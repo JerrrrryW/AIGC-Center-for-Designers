@@ -6,6 +6,7 @@ import torch
 from typing import List, Optional
 import shutil
 import os
+import json
 from datetime import datetime
 import io
 from diffusers import DiffusionPipeline
@@ -161,21 +162,51 @@ def get_lora_models():
             continue
 
         try:
-            # Example folder name: lora-models/sks_dog-20251017-103000
-            parts = folder.split('-')
-            prompt = parts[0].replace('_', ' ')
-            date = parts[1]
-            time = parts[2]
-            creation_time = datetime.strptime(f"{date}-{time}", "%Y%m%d-%H%M%S").isoformat()
+            metadata_path = os.path.join(folder_path, "metadata.json")
+            metadata = {}
+            if os.path.isfile(metadata_path):
+                try:
+                    with open(metadata_path, "r", encoding="utf-8") as meta_file:
+                        metadata = json.load(meta_file)
+                except (OSError, json.JSONDecodeError) as meta_err:
+                    print(f"Failed to read metadata for {folder}: {meta_err}")
+
+            prompt = metadata.get("prompt")
+            creation_time = metadata.get("creation_time")
+            model_display_name = metadata.get("model_name") or metadata.get("display_name")
+            base_model = metadata.get("base_model") or metadata.get("base_model_name")
+
+            if not creation_time:
+                try:
+                    parts = folder.split('-')
+                    date = parts[1]
+                    time = parts[2]
+                    creation_time = datetime.strptime(f"{date}-{time}", "%Y%m%d-%H%M%S").isoformat()
+                except (IndexError, ValueError):
+                    creation_time = datetime.fromtimestamp(os.path.getmtime(folder_path)).isoformat()
+
+            if not prompt:
+                try:
+                    prompt = folder.split('-')[0].replace('_', ' ')
+                except IndexError:
+                    prompt = folder
+
+            thumbnail_url = None
+            thumbnail_file = metadata.get("thumbnail", "thumbnail.png")
+            thumbnail_path = os.path.join(folder_path, thumbnail_file)
+            if os.path.isfile(thumbnail_path):
+                thumbnail_url = f"http://localhost:8000/models/{folder}/thumbnail"
 
             models_info.append({
                 "name": folder,
+                "model_name": model_display_name or folder,
+                "base_model": base_model or "Unknown",
                 "prompt": prompt,
                 "creation_time": creation_time,
+                "thumbnail_url": thumbnail_url,
             })
-        except (IndexError, ValueError) as e:
-            # Skip folders with unexpected naming conventions
-            print(f"Could not parse model folder '{folder}': {e}")
+        except Exception as e:
+            print(f"Failed to process model folder '{folder}': {e}")
             continue
             
     # Sort models by creation time, newest first
@@ -219,6 +250,14 @@ def delete_lora_model(model_name: str):
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete model: {e}"}
 
+@app.get("/models/{model_name}/thumbnail")
+def get_model_thumbnail(model_name: str):
+    models_dir = "lora_models"
+    thumbnail_path = os.path.join(models_dir, model_name, "thumbnail.png")
+    if not os.path.isfile(thumbnail_path):
+        return JSONResponse(status_code=404, content={"message": "Thumbnail not found."})
+    return FileResponse(thumbnail_path, media_type="image/png")
+
 
 @app.get("/generate/image/{image_id}")
 def get_generated_image(image_id: str):
@@ -250,6 +289,7 @@ async def trigger_training(
     images: List[UploadFile] = File(...),
     baseModel: str = Form(...),
     instancePrompt: str = Form(...),
+    modelName: Optional[str] = Form(None),
     steps: int = Form(...),
     learningRate: float = Form(...),
     resolution: int = Form(...),
@@ -273,11 +313,14 @@ async def trigger_training(
     safe_prompt = instancePrompt.replace(' ', '_').replace('\\','').replace('/','')
     output_dir = f"lora_models/{safe_prompt}-{timestamp}"
 
+    user_model_name = modelName.strip() if modelName else None
+
     training_config = TrainingConfig(
         pretrained_model_name_or_path=baseModel,
         instance_data_dir=image_dir,
         output_dir=output_dir,
         instance_prompt=instancePrompt,
+        user_model_name=user_model_name,
         max_train_steps=steps,
         learning_rate=learningRate,
         resolution=resolution,

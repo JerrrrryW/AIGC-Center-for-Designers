@@ -10,12 +10,15 @@ import CancelIcon from '@mui/icons-material/Cancel';
 
 interface LoRAModel {
   name: string; // This is the folder name, used as ID
-  model_name: string; // This is the user-defined name
-  base_model: string;
-  prompt: string;
-  creation_time: string;
+  model_name?: string; // This is the user-defined name
+  base_model?: string;
+  prompt?: string;
+  creation_time?: string;
   thumbnail_url?: string; // Optional thumbnail
 }
+
+const PLACEHOLDER_IMAGE =
+  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="140" viewBox="0 0 300 140"><rect width="300" height="140" fill="%23e0e0e0"/><text x="50%" y="50%" text-anchor="middle" fill="%23757575" font-size="20" font-family="Arial" dy=".35em">No Preview</text></svg>';
 
 const ModelsPage: React.FC = () => {
   const [models, setModels] = useState<LoRAModel[]>([]);
@@ -68,7 +71,7 @@ const ModelsPage: React.FC = () => {
 
   const handleRenameStart = (model: LoRAModel) => {
     setEditingModel(model.name);
-    setNewName(model.model_name);
+    setNewName(model.model_name || model.name);
   };
 
   const handleRenameCancel = () => {
@@ -117,8 +120,8 @@ const ModelsPage: React.FC = () => {
               <CardMedia
                 component="img"
                 height="140"
-                image={model.thumbnail_url || 'https://via.placeholder.com/300x140.png?text=No+Preview'}
-                alt={`Preview for ${model.model_name}`}
+                image={model.thumbnail_url || PLACEHOLDER_IMAGE}
+                alt={`Preview for ${model.model_name || model.name}`}
               />
               <CardContent sx={{ flexGrow: 1 }}>
                 {editingModel === model.name ? (
@@ -136,7 +139,7 @@ const ModelsPage: React.FC = () => {
                 ) : (
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <Typography variant="h6" component="div">
-                      {model.model_name}
+                      {model.model_name || model.name}
                     </Typography>
                     <IconButton onClick={() => handleRenameStart(model)} size="small"><EditIcon /></IconButton>
                   </Box>
@@ -145,13 +148,13 @@ const ModelsPage: React.FC = () => {
                   ID: {model.name}
                 </Typography>
                 <Typography sx={{ mt: 1.5 }} color="text.secondary">
-                  Base Model: <strong>{model.base_model}</strong>
+                  Base Model: <strong>{model.base_model || 'Unknown'}</strong>
                 </Typography>
                 <Typography sx={{ mt: 1.5 }} color="text.secondary">
-                  Instance Prompt: <strong>{model.prompt}</strong>
+                  Instance Prompt: <strong>{model.prompt || 'N/A'}</strong>
                 </Typography>
                 <Typography sx={{ mt: 1 }} color="text.secondary">
-                  Created: {new Date(model.creation_time).toLocaleString()}
+                  Created: {model.creation_time ? new Date(model.creation_time).toLocaleString() : 'Unknown'}
                 </Typography>
               </CardContent>
               <CardActions>

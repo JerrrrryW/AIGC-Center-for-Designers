@@ -10,6 +10,11 @@ import {
   ListItemButton,
   ListItemText,
   Stack,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
 } from '@mui/material';
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
@@ -19,6 +24,9 @@ import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import ZoomOutIcon from '@mui/icons-material/ZoomOut';
 import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong';
 import DownloadIcon from '@mui/icons-material/Download';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import CloseIcon from '@mui/icons-material/Close';
+import InferencePanel from './inference/InferencePanel';
 
 type CanvasItem = {
   id: string;
@@ -44,6 +52,7 @@ const CanvasPage: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [isExporting, setIsExporting] = useState(false);
+  const [isInferenceOpen, setIsInferenceOpen] = useState(false);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -148,6 +157,43 @@ const CanvasPage: React.FC = () => {
     [items],
   );
 
+  const addCanvasItem = useCallback(
+    (src: string, name: string, naturalWidth: number, naturalHeight: number) => {
+      if (!naturalWidth || !naturalHeight) {
+        return;
+      }
+
+      const baseWidth = Math.min(naturalWidth, 320);
+      const scale = baseWidth / naturalWidth;
+      const baseHeight = naturalHeight * scale;
+      const canvasCenter = CANVAS_DIMENSION / 2;
+
+      const itemTemplate: Omit<CanvasItem, 'zIndex'> = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        src,
+        name,
+        x: canvasCenter - baseWidth / 2,
+        y: canvasCenter - baseHeight / 2,
+        width: baseWidth,
+        height: baseHeight,
+        naturalWidth,
+        naturalHeight,
+      };
+
+      let nextItem: CanvasItem | null = null;
+      setItems((prev) => {
+        const maxZ = prev.reduce((acc, item) => Math.max(acc, item.zIndex), 0);
+        nextItem = { ...itemTemplate, zIndex: maxZ + 1 };
+        return [...prev, nextItem];
+      });
+
+      if (nextItem) {
+        setSelectedId(nextItem.id);
+      }
+    },
+    [setItems, setSelectedId],
+  );
+
   const handleBackgroundMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.target === contentRef.current) {
       setSelectedId(null);
@@ -220,17 +266,11 @@ const CanvasPage: React.FC = () => {
       return;
     }
 
-    const existingMaxZ = items.reduce((acc, item) => Math.max(acc, item.zIndex), 0);
-    let zCursor = existingMaxZ;
-
-    const newItems: CanvasItem[] = [];
-
     for (const file of files) {
       if (!file.type.startsWith('image/')) {
         continue;
       }
       const src = URL.createObjectURL(file);
-      createdUrls.current.add(src);
 
       try {
         const image = await loadImageElement(src);
@@ -238,40 +278,91 @@ const CanvasPage: React.FC = () => {
         const naturalHeight = image.naturalHeight || image.height;
 
         if (!naturalWidth || !naturalHeight) {
+          URL.revokeObjectURL(src);
           continue;
         }
 
-        const baseWidth = Math.min(naturalWidth, 320);
-        const scale = baseWidth / naturalWidth;
-        const baseHeight = naturalHeight * scale;
-
-        const canvasCenter = CANVAS_DIMENSION / 2;
-
-        const item: CanvasItem = {
-          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          src,
-          name: file.name,
-          x: canvasCenter - baseWidth / 2,
-          y: canvasCenter - baseHeight / 2,
-          width: baseWidth,
-          height: baseHeight,
-          zIndex: ++zCursor,
-          naturalWidth,
-          naturalHeight,
-        };
-        newItems.push(item);
+        createdUrls.current.add(src);
+        addCanvasItem(src, file.name, naturalWidth, naturalHeight);
       } catch {
-        // Ignore files that fail to load into the canvas.
+        URL.revokeObjectURL(src);
       }
-    }
-
-    if (newItems.length) {
-      setItems((prev) => [...prev, ...newItems]);
-      setSelectedId(newItems[newItems.length - 1].id);
     }
 
     event.target.value = '';
   };
+
+  const handleAddGeneratedImage = useCallback(
+    async (imageUrl: string) => {
+      let objectUrl: string | null = null;
+      try {
+        const response = await fetch(imageUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch generated image: ${response.status}`);
+        }
+        const blob = await response.blob();
+        if (!blob.type.startsWith('image/')) {
+          throw new Error('Generated asset is not an image.');
+        }
+
+        objectUrl = URL.createObjectURL(blob);
+        const image = await loadImageElement(objectUrl);
+        const naturalWidth = image.naturalWidth || image.width;
+        const naturalHeight = image.naturalHeight || image.height;
+
+        if (!naturalWidth || !naturalHeight) {
+          throw new Error('Invalid image dimensions.');
+        }
+
+        createdUrls.current.add(objectUrl);
+        addCanvasItem(objectUrl, `generated-${Date.now()}.png`, naturalWidth, naturalHeight);
+      } catch (error) {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+        }
+        console.error('Failed to add generated image to canvas:', error);
+        throw error;
+      }
+    },
+    [addCanvasItem],
+  );
+
+  useEffect(() => {
+    const pendingRaw = sessionStorage.getItem('pendingCanvasItems');
+    if (!pendingRaw) {
+      return;
+    }
+    sessionStorage.removeItem('pendingCanvasItems');
+
+    let pendingItems: { dataUrl: string; name?: string }[] = [];
+    try {
+      pendingItems = JSON.parse(pendingRaw);
+    } catch (error) {
+      console.error('Failed to parse pending canvas items:', error);
+      return;
+    }
+
+    const importPending = async () => {
+      for (const item of pendingItems) {
+        try {
+          const blob = dataUrlToBlob(item.dataUrl);
+          const objectUrl = URL.createObjectURL(blob);
+          const image = await loadImageElement(objectUrl);
+          const naturalWidth = image.naturalWidth || image.width;
+          const naturalHeight = image.naturalHeight || image.height;
+          if (!naturalWidth || !naturalHeight) {
+            throw new Error('Stored image has invalid dimensions.');
+          }
+          createdUrls.current.add(objectUrl);
+          addCanvasItem(objectUrl, item.name || `generated-${Date.now()}.png`, naturalWidth, naturalHeight);
+        } catch (error) {
+          console.error('Failed to import stored canvas image:', error);
+        }
+      }
+    };
+
+    importPending();
+  }, [addCanvasItem]);
 
   const handleDeleteSelected = () => {
     if (!selectedId) {
@@ -547,6 +638,11 @@ const CanvasPage: React.FC = () => {
             <AddPhotoAlternateIcon />
           </IconButton>
         </Tooltip>
+        <Tooltip title="AI 生图">
+          <IconButton color="primary" onClick={() => setIsInferenceOpen(true)}>
+            <AutoAwesomeIcon />
+          </IconButton>
+        </Tooltip>
         <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
         <Tooltip title="置于最上层">
           <span>
@@ -659,6 +755,33 @@ const CanvasPage: React.FC = () => {
         )}
       </Paper>
 
+      <Dialog
+        open={isInferenceOpen}
+        onClose={() => setIsInferenceOpen(false)}
+        fullWidth
+        maxWidth="lg"
+      >
+        <DialogTitle
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            pr: 2,
+          }}
+        >
+          AI 生图
+          <IconButton onClick={() => setIsInferenceOpen(false)}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <InferencePanel onAddToCanvas={handleAddGeneratedImage} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setIsInferenceOpen(false)}>关闭</Button>
+        </DialogActions>
+      </Dialog>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -704,6 +827,22 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error('Unable to load image.'));
     image.src = src;
   });
+}
+
+function dataUrlToBlob(dataUrl: string): Blob {
+  const [metadata, base64Data] = dataUrl.split(',');
+  if (!metadata || !base64Data) {
+    throw new Error('Invalid data URL.');
+  }
+  const match = metadata.match(/data:(.*?);base64/);
+  const mime = match?.[1] || 'image/png';
+  const binary = atob(base64Data);
+  const length = binary.length;
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
 }
 
 export default CanvasPage;

@@ -13,9 +13,11 @@ import gc
 import math
 import shutil
 import logging
+import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -54,6 +56,7 @@ class TrainingConfig:
     instance_data_dir: str
     instance_prompt: str
     output_dir: str
+    user_model_name: Optional[str] = None
     max_train_steps: int = 1000
     learning_rate: float = 1e-4
     revision: Optional[str] = None
@@ -420,6 +423,37 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
                 text_encoder_lora_layers=None, # Not training text encoder
             )
             logger.info(f"LoRA weights saved to {config.output_dir}")
+
+            # Persist lightweight metadata for the frontend
+            try:
+                metadata = {
+                    "name": Path(config.output_dir).name,
+                    "model_name": config.user_model_name or Path(config.output_dir).name,
+                    "base_model": config.pretrained_model_name_or_path,
+                    "prompt": config.instance_prompt,
+                    "creation_time": datetime.utcnow().isoformat(),
+                    "thumbnail": "thumbnail.png",
+                }
+                metadata_path = Path(config.output_dir) / "metadata.json"
+                metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                logger.info(f"Metadata written to {metadata_path}")
+            except Exception as metadata_err:
+                logger.warning(f"Failed to write metadata for {config.output_dir}: {metadata_err}")
+
+            # Create a simple thumbnail from the first training image
+            try:
+                first_image_path = next(sorted(Path(config.instance_data_dir).glob("*")))
+                if first_image_path.is_file():
+                    thumbnail_path = Path(config.output_dir) / "thumbnail.png"
+                    with Image.open(first_image_path) as thumb_image:
+                        thumb_image = exif_transpose(thumb_image).convert("RGB")
+                        thumb_image.thumbnail((512, 512))
+                        thumb_image.save(thumbnail_path, format="PNG")
+                    logger.info(f"Thumbnail saved to {thumbnail_path}")
+            except StopIteration:
+                logger.warning("No training images available to generate thumbnail.")
+            except Exception as thumb_err:
+                logger.warning(f"Failed to create thumbnail for {config.output_dir}: {thumb_err}")
 
         accelerator.end_training()
         

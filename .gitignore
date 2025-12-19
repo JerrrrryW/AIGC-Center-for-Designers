@@ -16,3 +16,4 @@ env/
 # Application Specific - LoRA training outputs and temporary files
 /lora_models/
 /temp_training_images/
+Server/__pycache__/
