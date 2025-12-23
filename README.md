@@ -1,4 +1,4 @@
-# GEMINI Project Context: LoRA Training and Inference Platform
+# LoRA Training and Inference Platform
 
 ## Project Overview
 

@@ -7,11 +7,13 @@ from typing import List, Optional
 import shutil
 import os
 import json
+import re
 from datetime import datetime
 import io
 from diffusers import DiffusionPipeline
 
 from .train_lora import TrainingConfig, start_training as run_lora_training
+from .captioning import caption_images
 
 app = FastAPI()
 
@@ -23,6 +25,13 @@ training_status = {
     "progress": 0,    # 0-100
     "message": "Server is ready.",
     "should_stop": False,
+}
+
+caption_status = {
+    "status": "idle",  # idle, loading, processing, completed, failed
+    "progress": 0,
+    "message": "Ready for captioning.",
+    "results": {},
 }
 
 # --- CORS Middleware ---
@@ -129,6 +138,27 @@ def run_inference_task(req: GenerateRequest):
             del pipe
             torch.cuda.empty_cache()
 
+
+def run_caption_task(images_payload, prefix=None, suffix=None):
+    caption_status.update(
+        {
+            "status": "loading",
+            "progress": 0,
+            "message": "Loading caption model...",
+            "results": {},
+        }
+    )
+    try:
+        caption_images(
+            images_payload,
+            prefix=prefix,
+            suffix=suffix,
+            status_updater=caption_status,
+        )
+    except Exception as e:
+        print(f"Error during captioning: {e}")
+        caption_status.update({"status": "failed", "message": str(e)})
+
 @app.post("/generate")
 async def start_generation(req: GenerateRequest, background_tasks: BackgroundTasks):
     if inference_status["status"] in ["loading", "processing"]:
@@ -140,6 +170,37 @@ async def start_generation(req: GenerateRequest, background_tasks: BackgroundTas
 @app.get("/generate/status")
 def get_inference_status():
     return inference_status
+
+@app.post("/caption")
+async def start_captioning(
+    background_tasks: BackgroundTasks,
+    images: List[UploadFile] = File(...),
+    prefix: Optional[str] = Form(None),
+    suffix: Optional[str] = Form(None),
+):
+    if caption_status["status"] in ["loading", "processing"]:
+        return {"status": "error", "message": "A captioning job is already in progress."}
+
+    images_payload = []
+    for image in images:
+        filename = os.path.basename(str(image.filename))
+        content = await image.read()
+        images_payload.append({"filename": filename, "content": content})
+
+    caption_status.update(
+        {
+            "status": "loading",
+            "progress": 0,
+            "message": "Preparing captioning...",
+            "results": {},
+        }
+    )
+    background_tasks.add_task(run_caption_task, images_payload, prefix, suffix)
+    return {"status": "success", "message": "Captioning started in the background."}
+
+@app.get("/caption/status")
+def get_caption_status():
+    return caption_status
 
 @app.get("/models")
 def get_lora_models():
@@ -290,6 +351,8 @@ async def trigger_training(
     baseModel: str = Form(...),
     instancePrompt: str = Form(...),
     modelName: Optional[str] = Form(None),
+    useCaptions: bool = Form(False),
+    captions: Optional[str] = Form(None),
     steps: int = Form(...),
     learningRate: float = Form(...),
     resolution: int = Form(...),
@@ -303,14 +366,36 @@ async def trigger_training(
         shutil.rmtree(image_dir)
     os.makedirs(image_dir)
 
-    for image in images:
-        filename = os.path.basename(str(image.filename))
+    safe_prompt = instancePrompt.replace(' ', '_').replace('\\','').replace('/','')
+    safe_prompt = re.sub(r'[^A-Za-z0-9_-]', '', safe_prompt) or "instance"
+
+    captions_map = {}
+    if useCaptions:
+        if captions:
+            try:
+                captions_map = json.loads(captions)
+            except json.JSONDecodeError:
+                return {"status": "error", "message": "Invalid captions payload."}
+        else:
+            return {"status": "error", "message": "Captions are required when useCaptions is enabled."}
+
+    for index, image in enumerate(images, start=1):
+        original_name = os.path.basename(str(image.filename))
+        _, ext = os.path.splitext(original_name)
+        ext = ext if ext else ".png"
+        filename = f"{safe_prompt}-{index:03d}{ext}"
         file_path = os.path.join(image_dir, filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
+        if useCaptions:
+            caption_text = captions_map.get(original_name, "")
+            caption_text = caption_text.strip() if caption_text else ""
+            if caption_text:
+                caption_path = os.path.splitext(file_path)[0] + ".txt"
+                with open(caption_path, "w", encoding="utf-8") as caption_file:
+                    caption_file.write(caption_text)
     
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_prompt = instancePrompt.replace(' ', '_').replace('\\','').replace('/','')
     output_dir = f"lora_models/{safe_prompt}-{timestamp}"
 
     user_model_name = modelName.strip() if modelName else None

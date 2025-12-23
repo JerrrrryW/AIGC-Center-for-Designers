@@ -107,7 +107,12 @@ class DreamBoothDataset(Dataset):
         if not self.instance_data_root.exists():
             raise ValueError("Instance images root doesn't exist.")
 
-        self.instance_images_path = [img for img in Path(instance_data_root).iterdir() if img.is_file()]
+        valid_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+        self.instance_images_path = [
+            img
+            for img in Path(instance_data_root).iterdir()
+            if img.is_file() and img.suffix.lower() in valid_exts
+        ]
         self.num_instance_images = len(self.instance_images_path)
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images
@@ -130,15 +135,30 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
+        image_path = self.instance_images_path[index % self.num_instance_images]
+        instance_image = Image.open(image_path)
         instance_image = exif_transpose(instance_image)
 
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
 
+        base_prompt = self.instance_prompt.strip()
+        caption_text = ""
+        caption_path = image_path.with_suffix(".txt")
+        if caption_path.is_file():
+            try:
+                caption_text = caption_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                caption_text = ""
+
+        if caption_text:
+            caption_text = f"{base_prompt} {caption_text}".strip() if base_prompt else caption_text
+        else:
+            caption_text = base_prompt
+
         text_inputs = tokenize_prompt(
-            self.tokenizer, self.instance_prompt, tokenizer_max_length=self.tokenizer_max_length
+            self.tokenizer, caption_text, tokenizer_max_length=self.tokenizer_max_length
         )
         example["instance_prompt_ids"] = text_inputs.input_ids
         example["instance_attention_mask"] = text_inputs.attention_mask
