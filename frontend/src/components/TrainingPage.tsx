@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
+import { api } from '../api';
 import { 
   Container, Typography, Card, CardContent, Button, TextField, Slider, Box, Grid, 
   CircularProgress, Snackbar, Alert, LinearProgress, Tooltip, IconButton, Select, MenuItem, FormControl, InputLabel,
@@ -86,7 +87,7 @@ const TrainingPage: React.FC = () => {
   useEffect(() => {
     const pollStatus = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/train/status');
+        const response = await api.get('/train/status');
         const newStatus: TrainingStatus = response.data;
         setTrainingStatus(newStatus);
 
@@ -117,7 +118,7 @@ const TrainingPage: React.FC = () => {
   useEffect(() => {
     const pollCaptionStatus = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/caption/status');
+        const response = await api.get('/caption/status');
         const newStatus: CaptionStatus = response.data;
         setCaptionStatus(newStatus);
 
@@ -194,7 +195,7 @@ const TrainingPage: React.FC = () => {
     }
 
     try {
-      const response = await axios.post('http://localhost:8000/train', formData);
+      const response = await api.post('/train', formData);
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
       let message = 'An unknown error occurred.';
@@ -208,7 +209,7 @@ const TrainingPage: React.FC = () => {
 
   const handleCancelTraining = async () => {
     try {
-      const response = await axios.post('http://localhost:8000/train/terminate');
+      const response = await api.post('/train/terminate');
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
       let message = 'Failed to send termination signal.';
@@ -232,7 +233,7 @@ const TrainingPage: React.FC = () => {
     files.forEach(file => formData.append('images', file));
 
     try {
-      const response = await axios.post('http://localhost:8000/caption', formData);
+      const response = await api.post('/caption', formData);
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
       let message = 'An unknown error occurred.';

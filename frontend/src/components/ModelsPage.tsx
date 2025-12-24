@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { api, apiBaseUrl } from '../api';
 import {
   Container, Typography, Card, CardContent, Grid, Box, CircularProgress, Alert, Button, Dialog, 
   DialogActions, DialogContent, DialogContentText, DialogTitle, CardActions, CardMedia, TextField, IconButton
@@ -32,7 +33,7 @@ const ModelsPage: React.FC = () => {
   const fetchModels = async () => {
     try {
       setIsLoading(true);
-      const response = await axios.get('http://localhost:8000/models');
+      const response = await api.get('/models');
       setModels(response.data);
     } catch (err) {
       setError('Failed to fetch models. Is the backend server running?');
@@ -47,7 +48,7 @@ const ModelsPage: React.FC = () => {
   }, []);
 
   const handleDownload = (modelName: string) => {
-    window.open(`http://localhost:8000/models/download/${modelName}`);
+    window.open(`${apiBaseUrl}/models/download/${modelName}`);
   };
 
   const handleDeleteClick = (model: LoRAModel) => {
@@ -58,7 +59,7 @@ const ModelsPage: React.FC = () => {
   const handleDeleteConfirm = async () => {
     if (selectedModel) {
       try {
-        await axios.delete(`http://localhost:8000/models/delete/${selectedModel.name}`);
+        await api.delete(`/models/delete/${selectedModel.name}`);
         setOpenDeleteDialog(false);
         setSelectedModel(null);
         fetchModels(); // Refresh the model list
@@ -81,7 +82,7 @@ const ModelsPage: React.FC = () => {
 
   const handleRenameSave = async (originalName: string) => {
     try {
-      await axios.put(`http://localhost:8000/models/rename/${originalName}`, { new_name: newName });
+      await api.put(`/models/rename/${originalName}`, { new_name: newName });
       setEditingModel(null);
       setNewName('');
       fetchModels();

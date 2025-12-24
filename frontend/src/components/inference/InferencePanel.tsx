@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { api, apiBaseUrl } from '../../api';
 import {
   Grid,
   Card,
@@ -17,6 +18,10 @@ import {
   Paper,
   Snackbar,
   Alert,
+  Chip,
+  OutlinedInput,
+  Checkbox,
+  ListItemText,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -25,6 +30,7 @@ import LibraryAddIcon from '@mui/icons-material/LibraryAdd';
 interface LoRAModel {
   name: string;
   model_name?: string;
+  base_model?: string;
 }
 
 interface InferenceStatus {
@@ -42,9 +48,11 @@ export interface InferencePanelProps {
 }
 
 const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAddToCanvas }) => {
+  const defaultBaseModel = 'runwayml/stable-diffusion-v1-5';
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
-  const [selectedLora, setSelectedLora] = useState('None');
+  const [selectedBaseModel, setSelectedBaseModel] = useState(defaultBaseModel);
+  const [selectedLoras, setSelectedLoras] = useState<string[]>([]);
   const [loraModels, setLoraModels] = useState<LoRAModel[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState<InferenceStatus>({
@@ -68,7 +76,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/models');
+        const response = await api.get('/models');
         setLoraModels(response.data);
       } catch (err) {
         console.error('Failed to fetch LoRA models:', err);
@@ -77,17 +85,55 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
     fetchModels();
   }, []);
 
+  const baseModelOptions = useMemo(() => {
+    const options = new Set<string>([defaultBaseModel]);
+    loraModels
+      .map((model) => model.base_model)
+      .filter((modelName): modelName is string => Boolean(modelName))
+      .forEach((modelName) => options.add(modelName));
+    return Array.from(options);
+  }, [defaultBaseModel, loraModels]);
+
+  const visibleLoras = useMemo(
+    () => loraModels.filter((model) => model.base_model === selectedBaseModel || !model.base_model),
+    [loraModels, selectedBaseModel],
+  );
+
+  useEffect(() => {
+    if (!baseModelOptions.includes(selectedBaseModel)) {
+      setSelectedBaseModel(baseModelOptions[0]);
+      return;
+    }
+    if (selectedBaseModel === defaultBaseModel && baseModelOptions.length > 1 && visibleLoras.length === 0) {
+      setSelectedBaseModel(baseModelOptions[1]);
+    }
+  }, [baseModelOptions, defaultBaseModel, selectedBaseModel, visibleLoras.length]);
+
+  useEffect(() => {
+    const allowed = new Set(visibleLoras.map((model) => model.name));
+    setSelectedLoras((prev) => {
+      const next = prev.filter((name) => allowed.has(name));
+      if (next.length === prev.length && next.every((name, index) => name === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [visibleLoras]);
+
+  const resolveLoraName = (name: string) =>
+    loraModels.find((model) => model.name === name)?.model_name || name;
+
   useEffect(() => {
     const pollStatus = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/generate/status');
+        const response = await api.get('/generate/status');
         const newStatus: InferenceStatus = response.data;
         setStatus(newStatus);
 
         if (newStatus.status === 'completed') {
           if (pollingInterval.current) clearInterval(pollingInterval.current);
           setIsProcessing(false);
-          const imageUrl = `http://localhost:8000/generate/image/${newStatus.image_id}?t=${new Date().getTime()}`;
+          const imageUrl = `${apiBaseUrl}/generate/image/${newStatus.image_id}?t=${new Date().getTime()}`;
           setGeneratedImage(imageUrl);
           setSnackbar({ open: true, message: 'Image generated successfully!', severity: 'success' });
           onImageGenerated?.(imageUrl);
@@ -125,10 +171,11 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
     setStatus((prev) => ({ ...prev, status: 'loading', message: 'Sending request to server...' }));
 
     try {
-      await axios.post('http://localhost:8000/generate', {
+      await api.post('/generate', {
         prompt,
         negative_prompt: negativePrompt,
-        lora_model: selectedLora === 'None' ? null : selectedLora,
+        base_model: selectedBaseModel,
+        lora_models: selectedLoras,
       });
     } catch (error) {
       let message = 'An unknown error occurred.';
@@ -180,18 +227,49 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
                 Parameters
               </Typography>
               <FormControl fullWidth sx={{ mt: 2 }}>
-                <InputLabel id="lora-select-label">Use LoRA Model (Optional)</InputLabel>
+                <InputLabel id="base-model-select-label">Base Model</InputLabel>
                 <Select
-                  labelId="lora-select-label"
-                  value={selectedLora}
-                  label="Use LoRA Model (Optional)"
-                  onChange={(e) => setSelectedLora(e.target.value)}
+                  labelId="base-model-select-label"
+                  value={selectedBaseModel}
+                  label="Base Model"
+                  onChange={(e) => setSelectedBaseModel(e.target.value)}
                   disabled={isProcessing}
                 >
-                  <MenuItem value="None">None (Base Model Only)</MenuItem>
-                  {loraModels.map((model) => (
+                  {baseModelOptions.map((modelName) => (
+                    <MenuItem key={modelName} value={modelName}>
+                      {modelName}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl fullWidth sx={{ mt: 2 }}>
+                <InputLabel id="lora-select-label">LoRA Models (Optional)</InputLabel>
+                <Select
+                  labelId="lora-select-label"
+                  multiple
+                  value={selectedLoras}
+                  input={<OutlinedInput label="LoRA Models (Optional)" />}
+                  renderValue={(selected) => (
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                      {selected.map((value) => (
+                        <Chip key={value} label={resolveLoraName(value)} />
+                      ))}
+                    </Box>
+                  )}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setSelectedLoras(typeof value === 'string' ? value.split(',') : value);
+                  }}
+                  disabled={isProcessing}
+                >
+                  {visibleLoras.length === 0 && (
+                    <MenuItem disabled>No LoRA models available for this base model</MenuItem>
+                  )}
+                  {visibleLoras.map((model) => (
                     <MenuItem key={model.name} value={model.name}>
-                      {model.model_name || model.name}
+                      <Checkbox checked={selectedLoras.includes(model.name)} />
+                      <ListItemText primary={model.model_name || model.name} />
                     </MenuItem>
                   ))}
                 </Select>

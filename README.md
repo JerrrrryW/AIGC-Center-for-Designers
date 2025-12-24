@@ -45,7 +45,7 @@ The backend relies on a specific Conda environment and a set of Python packages.
     From the project root directory (`AIGC-Training`), run the following command:
 
     ```bash
-    conda run -n aigc uvicorn Server.main:app --reload --port 8000
+    conda run -n aigc uvicorn Server.main:app --reload --host 0.0.0.0 --port 8000
     ```
 
 ### 2. Frontend Setup
@@ -64,9 +64,18 @@ The frontend is a standard Vite-based React application.
     While inside the `frontend` directory, run:
 
     ```bash
-    npm run dev
+    npm run dev -- --host 0.0.0.0
     ```
     The application will typically be available at `http://localhost:5173`.
+
+### LAN Access (Optional)
+
+To access the UI from other devices on your LAN:
+
+1. Find your Mac's LAN IP (e.g. `192.168.x.x`) and open `http://<your-ip>:5173`.
+2. Ensure the backend is running with `--host 0.0.0.0` (shown above).
+3. If you use a custom API base URL, set `VITE_API_BASE_URL` (e.g. `http://<your-ip>:8000`) before `npm run dev`.
+4. If you need custom CORS origins, set `AIGC_CORS_ORIGINS` (comma-separated) or `AIGC_CORS_ORIGIN_REGEX` on the backend.
 
 ---
 

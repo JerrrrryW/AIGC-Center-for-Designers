@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 import io
 from diffusers import DiffusionPipeline
+from threading import Lock
 
 from .train_lora import TrainingConfig, start_training as run_lora_training
 from .captioning import caption_images
@@ -34,11 +35,25 @@ caption_status = {
     "results": {},
 }
 
+BASE_MODEL_DEFAULT = "runwayml/stable-diffusion-v1-5"
+DISABLE_SAFETY_CHECKER = True
+_pipe_cache = {
+    "base_model": None,
+    "pipe": None,
+}
+_pipe_lock = Lock()
+
 # --- CORS Middleware ---
-origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Allow LAN access by default while keeping localhost whitelisted.
+default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+origins_env = os.getenv("AIGC_CORS_ORIGINS", "")
+origins = [origin.strip() for origin in origins_env.split(",") if origin.strip()] or default_origins
+origin_regex_env = os.getenv("AIGC_CORS_ORIGIN_REGEX", "").strip()
+origin_regex = origin_regex_env or r"^http://(localhost|127\.0\.0\.1|\d{1,3}(\.\d{1,3}){3}|.*\.local):5173$"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,7 +64,9 @@ app.add_middleware(
 class GenerateRequest(BaseModel):
     prompt: str
     negative_prompt: Optional[str] = None
-    lora_model: Optional[str] = None # New field for LoRA model
+    base_model: Optional[str] = None
+    lora_models: Optional[List[str]] = None
+    lora_model: Optional[str] = None # Backward compat for single LoRA
 
 import uuid
 
@@ -89,22 +106,72 @@ def run_inference_task(req: GenerateRequest):
 
     pipe = None
     try:
-        pipe = DiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-        )
-        if torch.backends.mps.is_available():
-            pipe = pipe.to("mps")
+        base_model_id = req.base_model or BASE_MODEL_DEFAULT
+        lora_models = req.lora_models or []
+        if not lora_models and req.lora_model:
+            lora_models = [req.lora_model]
+        lora_models = [name for name in lora_models if name and name != "None"]
+        lora_models = list(dict.fromkeys(lora_models))
 
-        # Load LoRA weights if a model is specified
-        if req.lora_model and req.lora_model != "None":
-            lora_path = os.path.join("lora_models", req.lora_model)
-            if os.path.isdir(lora_path):
-                inference_status["message"] = f"Loading LoRA model: {req.lora_model}..."
-                pipe.load_lora_weights(lora_path)
+        with _pipe_lock:
+            if _pipe_cache["pipe"] is None or _pipe_cache["base_model"] != base_model_id:
+                if _pipe_cache["pipe"] is not None:
+                    try:
+                        _pipe_cache["pipe"].unload_lora_weights()
+                    except Exception:
+                        pass
+                    del _pipe_cache["pipe"]
+                    _pipe_cache["pipe"] = None
+                    torch.cuda.empty_cache()
+                    if torch.backends.mps.is_available():
+                        try:
+                            torch.mps.empty_cache()
+                        except AttributeError:
+                            pass
+
+                if torch.cuda.is_available():
+                    device = "cuda"
+                elif torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
+                dtype = torch.float16 if device == "cuda" else torch.float32
+                pipe = DiffusionPipeline.from_pretrained(
+                    base_model_id,
+                    torch_dtype=dtype,
+                    use_safetensors=True,
+                )
+                if DISABLE_SAFETY_CHECKER:
+                    pipe.safety_checker = None
+                    if hasattr(pipe, "feature_extractor"):
+                        pipe.feature_extractor = None
+                if device != "cpu":
+                    pipe = pipe.to(device)
+                pipe.enable_attention_slicing()
+                _pipe_cache["pipe"] = pipe
+                _pipe_cache["base_model"] = base_model_id
             else:
-                raise FileNotFoundError(f"LoRA model directory not found: {lora_path}")
+                pipe = _pipe_cache["pipe"]
+
+            if lora_models:
+                inference_status["message"] = f"Loading {len(lora_models)} LoRA model(s)..."
+                adapter_names = []
+                supports_multi = hasattr(pipe, "set_adapters")
+                if not supports_multi and len(lora_models) > 1:
+                    raise ValueError("Multiple LoRA adapters are not supported by the current diffusers version.")
+                for lora_name in lora_models:
+                    lora_path = os.path.join("lora_models", lora_name)
+                    if os.path.isdir(lora_path):
+                        if supports_multi:
+                            adapter_names.append(lora_name)
+                            pipe.load_lora_weights(lora_path, adapter_name=lora_name)
+                        else:
+                            pipe.load_lora_weights(lora_path)
+                    else:
+                        raise FileNotFoundError(f"LoRA model directory not found: {lora_path}")
+
+                if supports_multi:
+                    pipe.set_adapters(adapter_names, adapter_weights=[1.0] * len(adapter_names))
 
         inference_status["status"] = "processing"
         image = pipe(
@@ -133,10 +200,11 @@ def run_inference_task(req: GenerateRequest):
         inference_status.update({"status": "failed", "message": str(e)})
     finally:
         if pipe is not None:
-            # Unload LoRA weights for the next request
-            pipe.unload_lora_weights()
-            del pipe
-            torch.cuda.empty_cache()
+            with _pipe_lock:
+                try:
+                    pipe.unload_lora_weights()
+                except Exception:
+                    pass
 
 
 def run_caption_task(images_payload, prefix=None, suffix=None):
@@ -203,7 +271,7 @@ def get_caption_status():
     return caption_status
 
 @app.get("/models")
-def get_lora_models():
+def get_lora_models(request: Request):
     models_dir = "lora_models"
     if not os.path.exists(models_dir):
         return []
@@ -256,7 +324,8 @@ def get_lora_models():
             thumbnail_file = metadata.get("thumbnail", "thumbnail.png")
             thumbnail_path = os.path.join(folder_path, thumbnail_file)
             if os.path.isfile(thumbnail_path):
-                thumbnail_url = f"http://localhost:8000/models/{folder}/thumbnail"
+                base_url = str(request.base_url).rstrip("/")
+                thumbnail_url = f"{base_url}/models/{folder}/thumbnail"
 
             models_info.append({
                 "name": folder,
