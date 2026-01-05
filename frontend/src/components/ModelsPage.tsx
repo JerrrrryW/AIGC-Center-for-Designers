@@ -18,8 +18,9 @@ interface LoRAModel {
   thumbnail_url?: string; // Optional thumbnail
 }
 
-const PLACEHOLDER_IMAGE =
-  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="140" viewBox="0 0 300 140"><rect width="300" height="140" fill="%23e0e0e0"/><text x="50%" y="50%" text-anchor="middle" fill="%23757575" font-size="20" font-family="Arial" dy=".35em">No Preview</text></svg>';
+const PLACEHOLDER_IMAGE = `data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="140" viewBox="0 0 300 140"><rect width="300" height="140" fill="#e0e0e0"/><text x="50%" y="50%" text-anchor="middle" fill="#757575" font-size="20" font-family="Arial" dy=".35em">暂无预览</text></svg>',
+)}`;
 
 const ModelsPage: React.FC = () => {
   const [models, setModels] = useState<LoRAModel[]>([]);
@@ -36,7 +37,7 @@ const ModelsPage: React.FC = () => {
       const response = await api.get('/models');
       setModels(response.data);
     } catch (err) {
-      setError('Failed to fetch models. Is the backend server running?');
+      setError('获取模型失败。请确认后端服务已启动。');
       console.error(err);
     } finally {
       setIsLoading(false);
@@ -64,7 +65,7 @@ const ModelsPage: React.FC = () => {
         setSelectedModel(null);
         fetchModels(); // Refresh the model list
       } catch (err) {
-        setError(`Failed to delete model ${selectedModel.name}.`);
+        setError(`删除模型 ${selectedModel.name} 失败。`);
         console.error(err);
       }
     }
@@ -87,7 +88,7 @@ const ModelsPage: React.FC = () => {
       setNewName('');
       fetchModels();
     } catch (err) {
-      setError(`Failed to rename model.`);
+      setError('重命名模型失败。');
       console.error(err);
     }
   };
@@ -95,7 +96,7 @@ const ModelsPage: React.FC = () => {
   return (
     <Container maxWidth="lg">
       <Typography variant="h4" component="h1" gutterBottom>
-        Trained LoRA Models
+        已训练的 LoRA 模型
       </Typography>
 
       {isLoading && (
@@ -111,7 +112,7 @@ const ModelsPage: React.FC = () => {
       )}
 
       {!isLoading && !error && models.length === 0 && (
-        <Typography sx={{ mt: 4 }}>No trained models found.</Typography>
+        <Typography sx={{ mt: 4 }}>暂无已训练模型。</Typography>
       )}
 
       <Grid container spacing={3} sx={{ mt: 2 }}>
@@ -122,7 +123,7 @@ const ModelsPage: React.FC = () => {
                 component="img"
                 height="140"
                 image={model.thumbnail_url || PLACEHOLDER_IMAGE}
-                alt={`Preview for ${model.model_name || model.name}`}
+                alt={`预览：${model.model_name || model.name}`}
               />
               <CardContent sx={{ flexGrow: 1 }}>
                 {editingModel === model.name ? (
@@ -146,21 +147,21 @@ const ModelsPage: React.FC = () => {
                   </Box>
                 )}
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-                  ID: {model.name}
+                  ID：{model.name}
                 </Typography>
                 <Typography sx={{ mt: 1.5 }} color="text.secondary">
-                  Base Model: <strong>{model.base_model || 'Unknown'}</strong>
+                  基础模型：<strong>{model.base_model || '未知'}</strong>
                 </Typography>
                 <Typography sx={{ mt: 1.5 }} color="text.secondary">
-                  Instance Prompt: <strong>{model.prompt || 'N/A'}</strong>
+                  实例提示词：<strong>{model.prompt || '暂无'}</strong>
                 </Typography>
                 <Typography sx={{ mt: 1 }} color="text.secondary">
-                  Created: {model.creation_time ? new Date(model.creation_time).toLocaleString() : 'Unknown'}
+                  创建时间：{model.creation_time ? new Date(model.creation_time).toLocaleString() : '未知'}
                 </Typography>
               </CardContent>
               <CardActions>
-                <Button size="small" onClick={() => handleDownload(model.name)}>Download</Button>
-                <Button size="small" color="error" onClick={() => handleDeleteClick(model)}>Delete</Button>
+                <Button size="small" onClick={() => handleDownload(model.name)}>下载</Button>
+                <Button size="small" color="error" onClick={() => handleDeleteClick(model)}>删除</Button>
               </CardActions>
             </Card>
           </Grid>
@@ -172,16 +173,16 @@ const ModelsPage: React.FC = () => {
         open={openDeleteDialog}
         onClose={() => setOpenDeleteDialog(false)}
       >
-        <DialogTitle>Confirm Deletion</DialogTitle>
+        <DialogTitle>确认删除</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Are you sure you want to delete the model "{selectedModel?.model_name}"? This action cannot be undone.
+            确定要删除模型“{selectedModel?.model_name}”吗？此操作无法撤销。
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setOpenDeleteDialog(false)}>Cancel</Button>
+          <Button onClick={() => setOpenDeleteDialog(false)}>取消</Button>
           <Button onClick={handleDeleteConfirm} color="error" autoFocus>
-            Delete
+            删除
           </Button>
         </DialogActions>
       </Dialog>

@@ -24,14 +24,14 @@ app = FastAPI()
 training_status = {
     "status": "idle", # idle, initializing, loading_models, training, completed, failed
     "progress": 0,    # 0-100
-    "message": "Server is ready.",
+    "message": "服务器已就绪。",
     "should_stop": False,
 }
 
 caption_status = {
     "status": "idle",  # idle, loading, processing, completed, failed
     "progress": 0,
-    "message": "Ready for captioning.",
+    "message": "可开始生成描述。",
     "results": {},
 }
 
@@ -75,7 +75,7 @@ inference_status = {
     "progress": 0,
     "step": 0,
     "total_steps": 50,
-    "message": "Ready for inference.",
+    "message": "可开始推理。",
     "image_id": None,
 }
 
@@ -91,7 +91,7 @@ def run_inference_task(req: GenerateRequest):
         "status": "loading",
         "progress": 0,
         "step": 0,
-        "message": "Loading Stable Diffusion model...",
+        "message": "正在加载 Stable Diffusion 模型...",
         "image_id": None,
     })
 
@@ -100,7 +100,7 @@ def run_inference_task(req: GenerateRequest):
             "status": "processing",
             "step": step,
             "progress": (step / inference_status["total_steps"]) * 100,
-            "message": f"Inference in progress... Step {step}/{inference_status['total_steps']}",
+            "message": f"推理中... 步骤 {step}/{inference_status['total_steps']}",
         })
         return callback_kwargs
 
@@ -154,11 +154,11 @@ def run_inference_task(req: GenerateRequest):
                 pipe = _pipe_cache["pipe"]
 
             if lora_models:
-                inference_status["message"] = f"Loading {len(lora_models)} LoRA model(s)..."
+                inference_status["message"] = f"正在加载 {len(lora_models)} 个 LoRA 模型..."
                 adapter_names = []
                 supports_multi = hasattr(pipe, "set_adapters")
                 if not supports_multi and len(lora_models) > 1:
-                    raise ValueError("Multiple LoRA adapters are not supported by the current diffusers version.")
+                    raise ValueError("当前 diffusers 版本不支持多个 LoRA 适配器。")
                 for lora_name in lora_models:
                     lora_path = os.path.join("lora_models", lora_name)
                     if os.path.isdir(lora_path):
@@ -168,7 +168,7 @@ def run_inference_task(req: GenerateRequest):
                         else:
                             pipe.load_lora_weights(lora_path)
                     else:
-                        raise FileNotFoundError(f"LoRA model directory not found: {lora_path}")
+                        raise FileNotFoundError(f"未找到 LoRA 模型目录：{lora_path}")
 
                 if supports_multi:
                     pipe.set_adapters(adapter_names, adapter_weights=[1.0] * len(adapter_names))
@@ -191,7 +191,7 @@ def run_inference_task(req: GenerateRequest):
         inference_status.update({
             "status": "completed",
             "progress": 100,
-            "message": "Image generation complete.",
+            "message": "图片生成完成。",
             "image_id": image_id,
         })
 
@@ -212,7 +212,7 @@ def run_caption_task(images_payload, prefix=None, suffix=None):
         {
             "status": "loading",
             "progress": 0,
-            "message": "Loading caption model...",
+            "message": "正在加载描述模型...",
             "results": {},
         }
     )
@@ -230,10 +230,10 @@ def run_caption_task(images_payload, prefix=None, suffix=None):
 @app.post("/generate")
 async def start_generation(req: GenerateRequest, background_tasks: BackgroundTasks):
     if inference_status["status"] in ["loading", "processing"]:
-        return {"status": "error", "message": "An inference job is already in progress."}
+        return {"status": "error", "message": "已有推理任务正在进行。"}
     
     background_tasks.add_task(run_inference_task, req)
-    return {"status": "success", "message": "Image generation started in the background."}
+    return {"status": "success", "message": "图片生成已在后台开始。"}
 
 @app.get("/generate/status")
 def get_inference_status():
@@ -247,7 +247,7 @@ async def start_captioning(
     suffix: Optional[str] = Form(None),
 ):
     if caption_status["status"] in ["loading", "processing"]:
-        return {"status": "error", "message": "A captioning job is already in progress."}
+        return {"status": "error", "message": "已有描述生成任务正在进行。"}
 
     images_payload = []
     for image in images:
@@ -259,12 +259,12 @@ async def start_captioning(
         {
             "status": "loading",
             "progress": 0,
-            "message": "Preparing captioning...",
+            "message": "正在准备描述生成...",
             "results": {},
         }
     )
     background_tasks.add_task(run_caption_task, images_payload, prefix, suffix)
-    return {"status": "success", "message": "Captioning started in the background."}
+    return {"status": "success", "message": "描述生成已在后台开始。"}
 
 @app.get("/caption/status")
 def get_caption_status():
@@ -330,7 +330,7 @@ def get_lora_models(request: Request):
             models_info.append({
                 "name": folder,
                 "model_name": model_display_name or folder,
-                "base_model": base_model or "Unknown",
+                "base_model": base_model or "未知",
                 "prompt": prompt,
                 "creation_time": creation_time,
                 "thumbnail_url": thumbnail_url,
@@ -350,7 +350,7 @@ def download_lora_model(model_name: str):
     model_path = os.path.join(models_dir, model_name)
 
     if not os.path.isdir(model_path):
-        return JSONResponse(status_code=404, content={"message": "Model not found."})
+        return JSONResponse(status_code=404, content={"message": "未找到模型。"})
 
     # Check if the directory is empty
     if not os.listdir(model_path):
@@ -359,7 +359,7 @@ def download_lora_model(model_name: str):
             shutil.rmtree(model_path)
         except OSError as e:
             print(f"Error deleting empty directory {model_path}: {e}")
-        return JSONResponse(status_code=404, content={"message": "Model is empty and has been deleted. Please refresh the model list."})
+        return JSONResponse(status_code=404, content={"message": "模型目录为空，已删除。请刷新模型列表。"})
 
     # Create a zip archive of the model directory
     shutil.make_archive(model_name, 'zip', model_path)
@@ -372,20 +372,20 @@ def delete_lora_model(model_name: str):
     model_path = os.path.join(models_dir, model_name)
 
     if not os.path.isdir(model_path):
-        return {"status": "error", "message": "Model not found."}
+        return {"status": "error", "message": "未找到模型。"}
 
     try:
         shutil.rmtree(model_path)
-        return {"status": "success", "message": f"Model '{model_name}' deleted successfully."}
+        return {"status": "success", "message": f"模型 '{model_name}' 已删除。"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to delete model: {e}"}
+        return {"status": "error", "message": f"删除模型失败：{e}"}
 
 @app.get("/models/{model_name}/thumbnail")
 def get_model_thumbnail(model_name: str):
     models_dir = "lora_models"
     thumbnail_path = os.path.join(models_dir, model_name, "thumbnail.png")
     if not os.path.isfile(thumbnail_path):
-        return JSONResponse(status_code=404, content={"message": "Thumbnail not found."})
+        return JSONResponse(status_code=404, content={"message": "未找到缩略图。"})
     return FileResponse(thumbnail_path, media_type="image/png")
 
 
@@ -393,7 +393,7 @@ def get_model_thumbnail(model_name: str):
 def get_generated_image(image_id: str):
     image_data = generated_images.get(image_id)
     if not image_data:
-        return {"status": "error", "message": "Image not found."}
+        return {"status": "error", "message": "未找到图片。"}
     
     # Clean up the image from memory after it's been fetched once
     # del generated_images[image_id]
@@ -404,9 +404,9 @@ def get_generated_image(image_id: str):
 def check_mps():
     # ... (omitting unchanged endpoint for brevity)
     if torch.backends.mps.is_available():
-        return {"status": "success", "message": "MPS is available and ready for GPU acceleration on your Mac."}
+        return {"status": "success", "message": "MPS 可用，已准备好在 Mac 上进行 GPU 加速。"}
     else:
-        return {"status": "error", "message": "MPS is not available. The server will use CPU."}
+        return {"status": "error", "message": "MPS 不可用，服务器将使用 CPU。"}
 
 @app.get("/train/status")
 def get_training_status():
@@ -428,7 +428,7 @@ async def trigger_training(
     trainBatchSize: int = Form(...),
 ):
     if training_status["status"] == "training":
-        return {"status": "error", "message": "A training job is already in progress."}
+        return {"status": "error", "message": "已有训练任务正在进行。"}
 
     image_dir = "temp_training_images"
     if os.path.exists(image_dir):
@@ -444,9 +444,9 @@ async def trigger_training(
             try:
                 captions_map = json.loads(captions)
             except json.JSONDecodeError:
-                return {"status": "error", "message": "Invalid captions payload."}
+                return {"status": "error", "message": "描述数据无效。"}
         else:
-            return {"status": "error", "message": "Captions are required when useCaptions is enabled."}
+            return {"status": "error", "message": "启用描述训练时必须提供描述。"}
 
     for index, image in enumerate(images, start=1):
         original_name = os.path.basename(str(image.filename))
@@ -488,12 +488,12 @@ async def trigger_training(
     )
 
     # Reset status and add the training function to background tasks
-    training_status.update({"status": "initializing", "progress": 0, "message": "Request received...", "should_stop": False})
+    training_status.update({"status": "initializing", "progress": 0, "message": "已收到请求...", "should_stop": False})
     background_tasks.add_task(run_lora_training, config=training_config, status_updater=training_status)
 
     return {
         "status": "success",
-        "message": f"Training started in the background. Model will be saved to '{output_dir}'.",
+        "message": f"训练已在后台开始，模型将保存到 '{output_dir}'。",
     }
 
 @app.post("/train/terminate")
@@ -501,7 +501,7 @@ def terminate_training():
     """Endpoint to signal the training process to stop."""
     if training_status["status"] in ["training", "initializing", "loading_models"]:
         training_status["should_stop"] = True
-        training_status["message"] = "Termination signal received. Finishing current step..."
-        return {"status": "success", "message": "Termination signal sent."}
+        training_status["message"] = "已收到终止信号，正在完成当前步骤..."
+        return {"status": "success", "message": "已发送终止信号。"}
     else:
-        return {"status": "error", "message": "No active training to terminate."}
+        return {"status": "error", "message": "当前没有正在进行的训练。"}

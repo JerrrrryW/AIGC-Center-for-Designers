@@ -17,3 +17,4 @@ env/
 /lora_models/
 /temp_training_images/
 Server/__pycache__/
+LiteDraw-integration-requirements.md

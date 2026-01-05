@@ -298,11 +298,11 @@ const CanvasPage: React.FC = () => {
       try {
         const response = await fetch(imageUrl);
         if (!response.ok) {
-          throw new Error(`Failed to fetch generated image: ${response.status}`);
+          throw new Error(`获取生成图片失败：${response.status}`);
         }
         const blob = await response.blob();
         if (!blob.type.startsWith('image/')) {
-          throw new Error('Generated asset is not an image.');
+          throw new Error('生成内容解析失败。');
         }
 
         objectUrl = URL.createObjectURL(blob);
@@ -311,16 +311,16 @@ const CanvasPage: React.FC = () => {
         const naturalHeight = image.naturalHeight || image.height;
 
         if (!naturalWidth || !naturalHeight) {
-          throw new Error('Invalid image dimensions.');
+          throw new Error('图片尺寸无效。');
         }
 
         createdUrls.current.add(objectUrl);
-        addCanvasItem(objectUrl, `generated-${Date.now()}.png`, naturalWidth, naturalHeight);
+        addCanvasItem(objectUrl, `生成-${Date.now()}.png`, naturalWidth, naturalHeight);
       } catch (error) {
         if (objectUrl) {
           URL.revokeObjectURL(objectUrl);
         }
-        console.error('Failed to add generated image to canvas:', error);
+        console.error('添加生成图片到画布失败:', error);
         throw error;
       }
     },
@@ -338,7 +338,7 @@ const CanvasPage: React.FC = () => {
     try {
       pendingItems = JSON.parse(pendingRaw);
     } catch (error) {
-      console.error('Failed to parse pending canvas items:', error);
+      console.error('解析待导入画布素材失败:', error);
       return;
     }
 
@@ -351,12 +351,12 @@ const CanvasPage: React.FC = () => {
           const naturalWidth = image.naturalWidth || image.width;
           const naturalHeight = image.naturalHeight || image.height;
           if (!naturalWidth || !naturalHeight) {
-            throw new Error('Stored image has invalid dimensions.');
+            throw new Error('存储的图片尺寸无效。');
           }
           createdUrls.current.add(objectUrl);
-          addCanvasItem(objectUrl, item.name || `generated-${Date.now()}.png`, naturalWidth, naturalHeight);
+          addCanvasItem(objectUrl, item.name || `生成-${Date.now()}.png`, naturalWidth, naturalHeight);
         } catch (error) {
-          console.error('Failed to import stored canvas image:', error);
+          console.error('导入已保存的画布素材失败:', error);
         }
       }
     };
@@ -494,7 +494,7 @@ const CanvasPage: React.FC = () => {
       const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = blobUrl;
-      link.download = `canvas-${Date.now()}.png`;
+      link.download = `画布-${Date.now()}.png`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -511,7 +511,7 @@ const CanvasPage: React.FC = () => {
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2}>
         <Box>
           <Typography variant="h1" fontSize="26px" fontWeight={600}>
-            Designer Canvas
+            设计师画布
           </Typography>
           <Typography variant="body2" color="text.secondary">
             上传素材，拖拽排布，快速拼出你的灵感板。
@@ -824,7 +824,7 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Unable to load image.'));
+    image.onerror = () => reject(new Error('加载图片失败。'));
     image.src = src;
   });
 }
@@ -832,7 +832,7 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
 function dataUrlToBlob(dataUrl: string): Blob {
   const [metadata, base64Data] = dataUrl.split(',');
   if (!metadata || !base64Data) {
-    throw new Error('Invalid data URL.');
+    throw new Error('无效的数据 URL。');
   }
   const match = metadata.match(/data:(.*?);base64/);
   const mime = match?.[1] || 'image/png';

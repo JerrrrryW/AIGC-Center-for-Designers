@@ -36,10 +36,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   };
 
   const menuItems = [
-    { text: 'LoRA Training', path: '/', icon: <ModelTrainingIcon /> },
-    { text: 'SD Inference', path: '/inference', icon: <ImagesearchRollerIcon /> },
-    { text: 'Trained Models', path: '/models', icon: <StorageIcon /> },
-    { text: 'Canvas', path: '/canvas', icon: <BrushIcon /> },
+    { text: 'LoRA 训练', path: '/', icon: <ModelTrainingIcon /> },
+    { text: '推理生成', path: '/inference', icon: <ImagesearchRollerIcon /> },
+    { text: '训练模型', path: '/models', icon: <StorageIcon /> },
+    { text: '画布', path: '/canvas', icon: <BrushIcon /> },
   ];
   const isCanvasRoute = location.pathname === '/canvas';
 
@@ -84,7 +84,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <Toolbar>
           <IconButton
             color="inherit"
-            aria-label="open drawer"
+            aria-label="打开侧边栏"
             edge="start"
             onClick={handleDrawerToggle}
             sx={{ mr: 2, display: { sm: 'none' } }}
@@ -92,7 +92,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <MenuIcon />
           </IconButton>
           <Typography variant="h6" noWrap component="div">
-            DHUX AIGC Center
+            DHUX AIGC 中心
           </Typography>
         </Toolbar>
       </AppBar>

@@ -98,7 +98,7 @@ const TrainingPage: React.FC = () => {
           setSnackbar({ open: true, message: newStatus.message, severity: severity });
         }
       } catch (error) {
-        console.error("Failed to poll status:", error);
+        console.error("轮询训练状态失败:", error);
         if (pollingInterval.current) clearInterval(pollingInterval.current);
         setIsProcessing(false);
       }
@@ -133,14 +133,14 @@ const TrainingPage: React.FC = () => {
               );
             });
           }
-          setSnackbar({ open: true, message: newStatus.message || 'Captioning complete.', severity: 'success' });
+          setSnackbar({ open: true, message: newStatus.message || '描述生成完成。', severity: 'success' });
         } else if (newStatus.status === 'failed') {
           if (captionPollingInterval.current) clearInterval(captionPollingInterval.current);
           setIsCaptioning(false);
-          setSnackbar({ open: true, message: newStatus.message || 'Captioning failed.', severity: 'error' });
+          setSnackbar({ open: true, message: newStatus.message || '描述生成失败。', severity: 'error' });
         }
       } catch (error) {
-        console.error("Failed to poll caption status:", error);
+        console.error("轮询描述状态失败:", error);
         if (captionPollingInterval.current) clearInterval(captionPollingInterval.current);
         setIsCaptioning(false);
       }
@@ -165,16 +165,16 @@ const TrainingPage: React.FC = () => {
 
   const handleStartTraining = async () => {
     if (files.length === 0) {
-      setSnackbar({ open: true, message: 'Please select images first.', severity: 'error' });
+      setSnackbar({ open: true, message: '请先选择图片。', severity: 'error' });
       return;
     }
     if (useCaptions && Object.keys(captions).length === 0) {
-      setSnackbar({ open: true, message: 'Please generate or enter captions first.', severity: 'error' });
+      setSnackbar({ open: true, message: '请先生成或输入描述。', severity: 'error' });
       return;
     }
 
     setIsProcessing(true);
-    setTrainingStatus({ status: 'initializing', progress: 0, message: 'Sending request...' });
+    setTrainingStatus({ status: 'initializing', progress: 0, message: '正在发送请求...' });
 
     const formData = new FormData();
     files.forEach(file => formData.append('images', file));
@@ -198,7 +198,7 @@ const TrainingPage: React.FC = () => {
       const response = await api.post('/train', formData);
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
-      let message = 'An unknown error occurred.';
+      let message = '发生未知错误。';
       if (axios.isAxiosError(error) && error.response) {
         message = error.response.data.detail || error.response.data.message || message;
       }
@@ -212,7 +212,7 @@ const TrainingPage: React.FC = () => {
       const response = await api.post('/train/terminate');
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
-      let message = 'Failed to send termination signal.';
+      let message = '发送终止训练请求失败。';
       if (axios.isAxiosError(error) && error.response) {
         message = error.response.data.detail || error.response.data.message || message;
       }
@@ -222,12 +222,12 @@ const TrainingPage: React.FC = () => {
 
   const handleStartCaptioning = async () => {
     if (files.length === 0) {
-      setSnackbar({ open: true, message: 'Please select images first.', severity: 'error' });
+      setSnackbar({ open: true, message: '请先选择图片。', severity: 'error' });
       return;
     }
 
     setIsCaptioning(true);
-    setCaptionStatus({ status: 'loading', progress: 0, message: 'Sending caption request...', results: {} });
+    setCaptionStatus({ status: 'loading', progress: 0, message: '正在发送描述请求...', results: {} });
 
     const formData = new FormData();
     files.forEach(file => formData.append('images', file));
@@ -236,7 +236,7 @@ const TrainingPage: React.FC = () => {
       const response = await api.post('/caption', formData);
       setSnackbar({ open: true, message: response.data.message, severity: 'success' });
     } catch (error) {
-      let message = 'An unknown error occurred.';
+      let message = '发生未知错误。';
       if (axios.isAxiosError(error) && error.response) {
         message = error.response.data.detail || error.response.data.message || message;
       }
@@ -250,7 +250,7 @@ const TrainingPage: React.FC = () => {
   return (
     <Container maxWidth={false} sx={{ mt: 4, mb: 4 }}>
       <Typography variant="h4" component="h1" gutterBottom>
-        LoRA Model Training
+        LoRA 模型训练
       </Typography>
 
       {isTrainingActive && (
@@ -266,7 +266,7 @@ const TrainingPage: React.FC = () => {
         <Grid item xs={12} md={5}>
           <Card sx={{ maxWidth: '500px' }}>
             <CardContent>
-              <Typography variant="h2" gutterBottom>1. Upload Images</Typography>
+              <Typography variant="h2" gutterBottom>1. 上传图片</Typography>
               <Box
                 sx={{
                   border: '2px dashed grey',
@@ -289,7 +289,7 @@ const TrainingPage: React.FC = () => {
                   onChange={(e) => handleFileChange(Array.from(e.target.files || []))}
                 />
                 <UploadFileIcon sx={{ fontSize: 48, color: 'grey.500' }} />
-                <Typography>Drag & drop images here, or click to select files</Typography>
+                <Typography>拖拽图片到这里，或点击选择文件</Typography>
               </Box>
               <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
                 <Button
@@ -297,7 +297,7 @@ const TrainingPage: React.FC = () => {
                   onClick={handleStartCaptioning}
                   disabled={isCaptioning || files.length === 0 || isProcessing}
                 >
-                  {isCaptioning ? 'Captioning...' : 'Auto Caption'}
+                  {isCaptioning ? '生成描述中...' : '自动生成描述'}
                 </Button>
                 <FormControlLabel
                   control={
@@ -307,13 +307,13 @@ const TrainingPage: React.FC = () => {
                       disabled={Object.keys(captions).length === 0 || isProcessing}
                     />
                   }
-                  label="Use per-image captions for training"
+                  label="使用每张图片的描述进行训练"
                 />
               </Box>
               {(isCaptioning || captionStatus.status === 'processing') && (
                 <Box sx={{ mt: 2 }}>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                    {captionStatus.message || 'Generating captions...'}
+                    {captionStatus.message || '正在生成描述...'}
                   </Typography>
                   <LinearProgress variant="determinate" value={captionStatus.progress} />
                 </Box>
@@ -333,14 +333,14 @@ const TrainingPage: React.FC = () => {
                     return (
                       <Box key={src} sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                         <Box sx={{ position: 'relative' }}>
-                          <img src={src} alt="preview" width="100%" height="100%" style={{ objectFit: 'cover', borderRadius: '8px' }} />
+                          <img src={src} alt="预览" width="100%" height="100%" style={{ objectFit: 'cover', borderRadius: '8px' }} />
                           <IconButton size="small" onClick={() => handleRemoveImage(index)} sx={{ position: 'absolute', top: 0, right: 0, backgroundColor: 'rgba(255,255,255,0.7)' }}>
                             <DeleteIcon fontSize="small" />
                           </IconButton>
                         </Box>
                         <TextField
                           size="small"
-                          placeholder="Caption (optional)"
+                          placeholder="图片描述（可选）"
                           value={fileName ? (captions[fileName] || '') : ''}
                           onChange={(event) => {
                             if (!fileName) {
@@ -363,50 +363,50 @@ const TrainingPage: React.FC = () => {
         <Grid item xs={12} md={7}>
           <Card>
             <CardContent>
-              <Typography variant="h2" gutterBottom>2. Set Parameters</Typography>
+              <Typography variant="h2" gutterBottom>2. 设置参数</Typography>
               <FormControl fullWidth sx={{ mb: 2 }}>
-                <InputLabel>Base Model ID</InputLabel>
-                <Select value={baseModel} label="Base Model ID" onChange={(e) => setBaseModel(e.target.value)} disabled={isProcessing}>
+                <InputLabel>基础模型 ID</InputLabel>
+                <Select value={baseModel} label="基础模型 ID" onChange={(e) => setBaseModel(e.target.value)} disabled={isProcessing}>
                   <MenuItem value="runwayml/stable-diffusion-v1-5">runwayml/stable-diffusion-v1-5</MenuItem>
                   {/* Add other models here if available */}
                 </Select>
               </FormControl>
-              <TextField fullWidth label="Model Name (e.g., 'MyDog')" variant="outlined" sx={{ mb: 2 }} value={modelName} onChange={(e) => setModelName(e.target.value)} disabled={isProcessing} />
-              <TextField fullWidth label="Instance Prompt (e.g., 'a photo of sks dog')" variant="outlined" sx={{ mb: 2 }} value={instancePrompt} onChange={(e) => setInstancePrompt(e.target.value)} disabled={isProcessing} />
+              <TextField fullWidth label="模型名称（例如：'MyDog'）" variant="outlined" sx={{ mb: 2 }} value={modelName} onChange={(e) => setModelName(e.target.value)} disabled={isProcessing} />
+              <TextField fullWidth label="训练提示词（例如：'a photo of sks dog'）" variant="outlined" sx={{ mb: 2 }} value={instancePrompt} onChange={(e) => setInstancePrompt(e.target.value)} disabled={isProcessing} />
               
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                <Tooltip title="Sets the number of training steps. More steps can lead to better results but take longer to train.">
+                <Tooltip title="设置训练步数。步数越多效果可能更好，但训练耗时更长。">
                   <IconButton size="small"><HelpOutlineIcon fontSize="small" /></IconButton>
                 </Tooltip>
-                <Typography sx={{ flexShrink: 0, mr: 2 }}>Training Steps</Typography>
-                <Slider value={steps} onChange={(_, newValue) => setSteps(newValue as number)} aria-label="Training Steps" step={100} marks min={100} max={2000} disabled={isProcessing} />
+                <Typography sx={{ flexShrink: 0, mr: 2 }}>训练步数</Typography>
+                <Slider value={steps} onChange={(_, newValue) => setSteps(newValue as number)} aria-label="训练步数" step={100} marks min={100} max={2000} disabled={isProcessing} />
                 <Typography sx={{ ml: 2, width: '70px' }}>{steps}</Typography>
               </Box>
 
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                <Tooltip title="Learning rate controls how much to change the model in response to the estimated error each time the model weights are updated. A smaller learning rate means more precise adjustments but requires more training steps.">
+                <Tooltip title="学习率控制每次更新权重的幅度。学习率更小会更精细，但需要更多训练步数。">
                   <IconButton size="small"><HelpOutlineIcon fontSize="small" /></IconButton>
                 </Tooltip>
-                <Typography sx={{ flexShrink: 0, mr: 2 }}>Learning Rate</Typography>
-                <Slider value={learningRate} onChange={(_, newValue) => setLearningRate(newValue as number)} aria-label="Learning Rate" step={1e-5} min={1e-5} max={1e-3} scale={(x) => x} disabled={isProcessing} />
+                <Typography sx={{ flexShrink: 0, mr: 2 }}>学习率</Typography>
+                <Slider value={learningRate} onChange={(_, newValue) => setLearningRate(newValue as number)} aria-label="学习率" step={1e-5} min={1e-5} max={1e-3} scale={(x) => x} disabled={isProcessing} />
                 <Typography sx={{ ml: 2, width: '70px' }}>{learningRate.toExponential(1)}</Typography>
               </Box>
 
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                <Tooltip title="Sets the processing size for training images. Larger resolutions can preserve more detail but significantly increase training time and memory usage. It's recommended to match the common size of your base model (e.g., 512px for v1.5).">
+                <Tooltip title="设置训练图像分辨率。分辨率越高细节越多，但训练时间与内存占用显著增加。建议与基础模型常用尺寸一致（如 v1.5 为 512px）。">
                   <IconButton size="small"><HelpOutlineIcon fontSize="small" /></IconButton>
                 </Tooltip>
-                <Typography sx={{ flexShrink: 0, mr: 2 }}>Resolution</Typography>
-                <Slider value={resolution} onChange={(_, newValue) => setResolution(newValue as number)} aria-label="Resolution" step={128} marks min={512} max={1024} disabled={isProcessing} />
+                <Typography sx={{ flexShrink: 0, mr: 2 }}>分辨率</Typography>
+                <Slider value={resolution} onChange={(_, newValue) => setResolution(newValue as number)} aria-label="分辨率" step={128} marks min={512} max={1024} disabled={isProcessing} />
                 <Typography sx={{ ml: 2, width: '70px' }}>{resolution}px</Typography>
               </Box>
 
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                <Tooltip title="How many images the model 'sees' at once. On memory-constrained Macs, it's recommended to keep this at 1. Increasing this value can speed up training but dramatically increases memory consumption and may lead to failure.">
+                <Tooltip title="每次训练看到的图片数量。内存紧张的 Mac 建议保持为 1。增大会加快训练但显著增加内存占用，可能导致失败。">
                   <IconButton size="small"><HelpOutlineIcon fontSize="small" /></IconButton>
                 </Tooltip>
-                <Typography sx={{ flexShrink: 0, mr: 2 }}>Batch Size</Typography>
-                <Slider value={trainBatchSize} onChange={(_, newValue) => setTrainBatchSize(newValue as number)} aria-label="Batch Size" step={1} marks min={1} max={8} disabled={isProcessing} />
+                <Typography sx={{ flexShrink: 0, mr: 2 }}>批大小</Typography>
+                <Slider value={trainBatchSize} onChange={(_, newValue) => setTrainBatchSize(newValue as number)} aria-label="批大小" step={1} marks min={1} max={8} disabled={isProcessing} />
                 <Typography sx={{ ml: 2, width: '70px' }}>{trainBatchSize}</Typography>
               </Box>
 
@@ -418,11 +418,11 @@ const TrainingPage: React.FC = () => {
       <Box sx={{ mt: 4, textAlign: 'center' }}>
         {!isTrainingActive ? (
           <Button variant="contained" color="primary" size="large" onClick={handleStartTraining} disabled={isProcessing} sx={{ minWidth: 150 }}>
-            {isProcessing ? <><CircularProgress size={24} color="inherit" sx={{ mr: 1 }} /> 训练中...</> : 'Start Training'}
+            {isProcessing ? <><CircularProgress size={24} color="inherit" sx={{ mr: 1 }} /> 训练中...</> : '开始训练'}
           </Button>
         ) : (
           <Button variant="contained" color="error" size="large" onClick={handleCancelTraining} disabled={!isTrainingActive}>
-            Cancel Training
+            取消训练
           </Button>
         )}
       </Box>

@@ -105,7 +105,7 @@ class DreamBoothDataset(Dataset):
 
         self.instance_data_root = Path(instance_data_root)
         if not self.instance_data_root.exists():
-            raise ValueError("Instance images root doesn't exist.")
+            raise ValueError("找不到训练图片目录。")
 
         valid_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
         self.instance_images_path = [
@@ -119,7 +119,7 @@ class DreamBoothDataset(Dataset):
 
         interpolation = getattr(transforms.InterpolationMode, image_interpolation_mode.upper(), None)
         if interpolation is None:
-            raise ValueError(f"Unsupported interpolation mode {image_interpolation_mode}.")
+            raise ValueError(f"不支持的插值模式 {image_interpolation_mode}。")
 
         self.image_transforms = transforms.Compose(
             [
@@ -216,12 +216,12 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
         from transformers import CLIPTextModel
         return CLIPTextModel
     else:
-        raise ValueError(f"{model_class} is not supported.")
+        raise ValueError(f"不支持的模型类型 {model_class}。")
 
 def start_training(config: TrainingConfig, status_updater: Optional[dict] = None):
     try:
         if status_updater:
-            status_updater.update({"status": "initializing", "progress": 0, "message": "Initializing training..."})
+            status_updater.update({"status": "initializing", "progress": 0, "message": "正在初始化训练..."})
 
         logging_dir = Path(config.output_dir, config.logging_dir)
         accelerator = Accelerator(
@@ -255,7 +255,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
 
         # ... (rest of the setup logic: tokenizer, models, etc.)
         if status_updater:
-            status_updater.update({"status": "loading_models", "progress": 5, "message": "Loading models..."})
+            status_updater.update({"status": "loading_models", "progress": 5, "message": "正在加载模型..."})
         
         # All the model loading logic from the original script goes here...
         if config.tokenizer_name:
@@ -350,7 +350,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
         # ... (logging info)
 
         if status_updater:
-            status_updater.update({"status": "training", "progress": 10, "message": "Starting training loop..."})
+            status_updater.update({"status": "training", "progress": 10, "message": "正在开始训练循环..."})
 
         global_step = 0
         terminated = False # Flag to indicate if training was stopped early
@@ -366,7 +366,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
                     terminated = True
                     logger.warning("Termination signal received. Stopping training.")
                     if status_updater:
-                        status_updater.update({"status": "failed", "progress": status_updater.get("progress", 0), "message": "Training was cancelled by the user."})
+                        status_updater.update({"status": "failed", "progress": status_updater.get("progress", 0), "message": "训练已被用户取消。"})
                     break # Exit the inner loop
 
                 with accelerator.accumulate(unet):
@@ -397,7 +397,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
                     elif noise_scheduler.config.prediction_type == "v_prediction":
                         target = noise_scheduler.get_velocity(model_input, noise, timesteps)
                     else:
-                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                        raise ValueError(f"未知的预测类型 {noise_scheduler.config.prediction_type}")
 
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                     
@@ -417,7 +417,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
                         progress_percent = (global_step / config.max_train_steps) * 100
                         status_updater.update({
                             "progress": round(progress_percent, 2),
-                            "message": f"Step {global_step}/{config.max_train_steps}"
+                            "message": f"步骤 {global_step}/{config.max_train_steps}"
                         })
 
                 logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -482,7 +482,7 @@ def start_training(config: TrainingConfig, status_updater: Optional[dict] = None
         accelerator.end_training()
         
         if status_updater and not terminated:
-            status_updater.update({"status": "completed", "progress": 100, "message": f"Training complete! Model saved to {config.output_dir}"})
+            status_updater.update({"status": "completed", "progress": 100, "message": f"训练完成！模型已保存到 {config.output_dir}"})
 
     except Exception as e:
         logger.error(f"Training failed with an error: {e}", exc_info=True)

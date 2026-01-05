@@ -79,7 +79,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
         const response = await api.get('/models');
         setLoraModels(response.data);
       } catch (err) {
-        console.error('Failed to fetch LoRA models:', err);
+        console.error('获取 LoRA 模型失败:', err);
       }
     };
     fetchModels();
@@ -135,7 +135,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
           setIsProcessing(false);
           const imageUrl = `${apiBaseUrl}/generate/image/${newStatus.image_id}?t=${new Date().getTime()}`;
           setGeneratedImage(imageUrl);
-          setSnackbar({ open: true, message: 'Image generated successfully!', severity: 'success' });
+          setSnackbar({ open: true, message: '图片生成成功！', severity: 'success' });
           onImageGenerated?.(imageUrl);
         } else if (newStatus.status === 'failed') {
           if (pollingInterval.current) clearInterval(pollingInterval.current);
@@ -143,7 +143,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
           setSnackbar({ open: true, message: newStatus.message, severity: 'error' });
         }
       } catch (error) {
-        console.error('Failed to poll status:', error);
+        console.error('获取进度失败:', error);
         if (pollingInterval.current) clearInterval(pollingInterval.current);
         setIsProcessing(false);
       }
@@ -162,13 +162,13 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
 
   const handleGenerateImage = async () => {
     if (!prompt) {
-      setSnackbar({ open: true, message: 'Please enter a prompt.', severity: 'error' });
+      setSnackbar({ open: true, message: '请输入提示词。', severity: 'error' });
       return;
     }
 
     setIsProcessing(true);
     setGeneratedImage(null);
-    setStatus((prev) => ({ ...prev, status: 'loading', message: 'Sending request to server...' }));
+    setStatus((prev) => ({ ...prev, status: 'loading', message: '正在向服务器发送请求...' }));
 
     try {
       await api.post('/generate', {
@@ -178,7 +178,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
         lora_models: selectedLoras,
       });
     } catch (error) {
-      let message = 'An unknown error occurred.';
+      let message = '发生未知错误。';
       if (axios.isAxiosError(error) && error.response) {
         message = error.response.data.detail || error.response.data.message || message;
       }
@@ -195,9 +195,9 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
     try {
       setIsAddingToCanvas(true);
       await onAddToCanvas(generatedImage);
-      setSnackbar({ open: true, message: 'Added to canvas!', severity: 'success' });
+      setSnackbar({ open: true, message: '已添加到画布！', severity: 'success' });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to add image to canvas.';
+      const message = error instanceof Error ? error.message : '添加到画布失败。';
       setSnackbar({ open: true, message, severity: 'error' });
     } finally {
       setIsAddingToCanvas(false);
@@ -208,7 +208,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
     if (generatedImage) {
       const link = document.createElement('a');
       link.href = generatedImage;
-      link.download = `generated_image_${Date.now()}.png`;
+      link.download = `生成图片_${Date.now()}.png`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -224,14 +224,14 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
           <Card sx={{ minWidth: { xs: '100%', md: 360 } }}>
             <CardContent>
               <Typography variant="h5" component="h2" gutterBottom>
-                Parameters
+                参数设置
               </Typography>
               <FormControl fullWidth sx={{ mt: 2 }}>
-                <InputLabel id="base-model-select-label">Base Model</InputLabel>
+                <InputLabel id="base-model-select-label">基础模型</InputLabel>
                 <Select
                   labelId="base-model-select-label"
                   value={selectedBaseModel}
-                  label="Base Model"
+                  label="基础模型"
                   onChange={(e) => setSelectedBaseModel(e.target.value)}
                   disabled={isProcessing}
                 >
@@ -244,12 +244,12 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
               </FormControl>
 
               <FormControl fullWidth sx={{ mt: 2 }}>
-                <InputLabel id="lora-select-label">LoRA Models (Optional)</InputLabel>
+                <InputLabel id="lora-select-label">LoRA 模型（可选）</InputLabel>
                 <Select
                   labelId="lora-select-label"
                   multiple
                   value={selectedLoras}
-                  input={<OutlinedInput label="LoRA Models (Optional)" />}
+                  input={<OutlinedInput label="LoRA 模型（可选）" />}
                   renderValue={(selected) => (
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
                       {selected.map((value) => (
@@ -264,7 +264,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
                   disabled={isProcessing}
                 >
                   {visibleLoras.length === 0 && (
-                    <MenuItem disabled>No LoRA models available for this base model</MenuItem>
+                    <MenuItem disabled>该基础模型暂无可用 LoRA</MenuItem>
                   )}
                   {visibleLoras.map((model) => (
                     <MenuItem key={model.name} value={model.name}>
@@ -278,7 +278,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
               <Box sx={{ mt: 3 }}>
                 <TextField
                   fullWidth
-                  label="Prompt (e.g., 'a beautiful landscape painting')"
+                  label="正向提示词（例如：'a beautiful landscape painting'）"
                   variant="outlined"
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
@@ -291,7 +291,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
               <Box sx={{ mt: 2 }}>
                 <TextField
                   fullWidth
-                  label="Negative Prompt (e.g., 'blurry, low quality')"
+                  label="反向提示词（例如：'blurry, low quality'）"
                   variant="outlined"
                   value={negativePrompt}
                   onChange={(e) => setNegativePrompt(e.target.value)}
@@ -310,7 +310,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
                   disabled={isProcessing}
                   sx={{ width: '100%' }}
                 >
-                  {isProcessing ? <CircularProgress size={24} color="inherit" /> : 'Generate Image'}
+                  {isProcessing ? <CircularProgress size={24} color="inherit" /> : '生成图片'}
                 </Button>
               </Box>
             </CardContent>
@@ -320,7 +320,7 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
           <Card sx={{ height: '100%', minWidth: { xs: '100%', md: 420 } }}>
             <CardContent sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
               <Typography variant="h5" component="h2" gutterBottom>
-                Result
+                生成结果
               </Typography>
               <Box
                 sx={{
@@ -350,21 +350,21 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
                   <Paper elevation={3} sx={{ display: 'inline-block', lineHeight: 0 }}>
                     <img
                       src={generatedImage}
-                      alt="Generated by Stable Diffusion"
+                      alt="Stable Diffusion 生成"
                       style={{ maxWidth: '100%', maxHeight: '60vh', borderRadius: '4px' }}
                     />
                   </Paper>
                 )}
                 {!isTaskActive && !generatedImage && (
                   <Typography variant="body1" color="text.secondary">
-                    Image will appear here
+                    生成的图片会显示在这里
                   </Typography>
                 )}
               </Box>
               {generatedImage && !isTaskActive && (
                 <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center', gap: 2 }}>
                   <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownload}>
-                    Download
+                    下载
                   </Button>
                   {onAddToCanvas && (
                     <Button
@@ -374,15 +374,15 @@ const InferencePanel: React.FC<InferencePanelProps> = ({ onImageGenerated, onAdd
                       onClick={handleAddToCanvas}
                       disabled={isAddingToCanvas}
                     >
-                      {isAddingToCanvas ? 'Adding...' : 'Add to Canvas'}
+                      {isAddingToCanvas ? '添加中...' : '添加到画布'}
                     </Button>
                   )}
                   <Button
                     variant="outlined"
                     startIcon={<ContentCopyIcon />}
-                    onClick={() => navigator.clipboard.writeText('Seed value not available')}
+                    onClick={() => navigator.clipboard.writeText('暂无种子')}
                   >
-                    Copy Seed
+                    复制种子
                   </Button>
                 </Box>
               )}

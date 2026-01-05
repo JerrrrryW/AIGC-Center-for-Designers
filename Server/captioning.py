@@ -44,7 +44,7 @@ def caption_images(
                 {
                     "status": "processing",
                     "progress": round((index - 1) / total * 100, 2) if total else 0,
-                    "message": f"Captioning {index}/{total}...",
+                    "message": f"生成描述中 {index}/{total}...",
                     "results": results,
                 }
             )
@@ -67,7 +67,7 @@ def caption_images(
             {
                 "status": "completed",
                 "progress": 100,
-                "message": "Captioning complete.",
+                "message": "描述生成完成。",
                 "results": results,
             }
         )

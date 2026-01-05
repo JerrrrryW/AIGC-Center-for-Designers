@@ -10,11 +10,11 @@ const InferencePage: React.FC = () => {
     async (imageUrl: string) => {
       const response = await fetch(imageUrl);
       if (!response.ok) {
-        throw new Error(`Failed to fetch generated image: ${response.status}`);
+        throw new Error(`获取生成图片失败：${response.status}`);
       }
       const blob = await response.blob();
       if (!blob.type.startsWith('image/')) {
-        throw new Error('Generated asset is not an image.');
+        throw new Error('生成内容解析失败。');
       }
 
       const dataUrl = await blobToDataUrl(blob);
@@ -24,13 +24,13 @@ const InferencePage: React.FC = () => {
         try {
           pendingItems = JSON.parse(pendingRaw);
         } catch (error) {
-          console.error('Failed to parse pending canvas queue. Resetting.', error);
+          console.error('解析待导入画布队列失败，已重置。', error);
           pendingItems = [];
         }
       }
       pendingItems.push({
         dataUrl,
-        name: `generated-${Date.now()}.png`,
+        name: `生成-${Date.now()}.png`,
       });
       sessionStorage.setItem('pendingCanvasItems', JSON.stringify(pendingItems));
       navigate('/canvas');
@@ -41,7 +41,7 @@ const InferencePage: React.FC = () => {
   return (
     <Container maxWidth={false}>
       <Typography variant="h4" component="h1" gutterBottom>
-        Stable Diffusion Inference
+        Stable Diffusion 推理
       </Typography>
       <InferencePanel onAddToCanvas={handleAddToCanvas} />
     </Container>
@@ -57,10 +57,10 @@ function blobToDataUrl(blob: Blob): Promise<string> {
       if (typeof reader.result === 'string') {
         resolve(reader.result);
       } else {
-        reject(new Error('Failed to read blob data.'));
+        reject(new Error('读取图片数据失败。'));
       }
     };
-    reader.onerror = () => reject(new Error('Failed to convert blob to data URL.'));
+    reader.onerror = () => reject(new Error('转换图片数据失败。'));
     reader.readAsDataURL(blob);
   });
 }
