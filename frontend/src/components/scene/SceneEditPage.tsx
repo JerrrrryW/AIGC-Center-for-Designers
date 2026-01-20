@@ -30,6 +30,12 @@ type LayoutComponent = {
   type: string;
   default?: any;
   slots?: MediaSlot[];
+  options?: any;
+  fields?: any;
+  min?: number;
+  max?: number;
+  step?: number;
+  allowMultiple?: boolean;
 };
 
 type LayoutSection = {
@@ -59,10 +65,12 @@ const SceneEditPage: React.FC = () => {
   const selectedOptions = state.selectedOptions || {};
 
   const aspectRatio = useMemo(() => {
+    const ratioField = layoutConfig?.meta?.aspect_ratio_field;
+    const fromUi = ratioField ? uiState?.[ratioField] : undefined;
     const fromSelected = selectedOptions['画幅比例']?.[0];
     const fromMeta = layoutConfig?.meta?.aspect_ratio;
-    return fromSelected || fromMeta || '3:4';
-  }, [layoutConfig?.meta?.aspect_ratio, selectedOptions]);
+    return fromUi || fromSelected || fromMeta || '3:4';
+  }, [layoutConfig?.meta?.aspect_ratio, layoutConfig?.meta?.aspect_ratio_field, selectedOptions, uiState]);
 
   const handleStateChange = useCallback((componentId: string, value: any) => {
     setUiState((prev) => ({ ...prev, [componentId]: value }));
@@ -359,6 +367,25 @@ function initializeUiState(layoutConfig?: LayoutConfig): Record<string, any> {
         next[component.id] = slots.map((slot) => ({ ...slot }));
       } else if (component.type === 'multi-select') {
         next[component.id] = Array.isArray(component.default) ? component.default : [];
+      } else if (component.type === 'toggle') {
+        next[component.id] = Boolean(component.default);
+      } else if (component.type === 'prompt-editor') {
+        const fields = Array.isArray(component.fields) ? component.fields : [];
+        const fieldState: Record<string, string> = {};
+        fields.forEach((field: any) => {
+          const fieldId = field?.id;
+          if (fieldId) {
+            fieldState[fieldId] = field?.default ?? '';
+          }
+        });
+        next[component.id] = fieldState;
+      } else if (component.type === 'number-input' || component.type === 'slider') {
+        const rawDefault = component.default;
+        const fallback = component.min ?? 0;
+        const defaultValue = Number.isFinite(Number(rawDefault)) ? Number(rawDefault) : fallback;
+        next[component.id] = defaultValue;
+      } else if (component.type === 'color-palette' && component.allowMultiple) {
+        next[component.id] = Array.isArray(component.default) ? component.default : [];
       } else {
         next[component.id] = component.default ?? '';
       }
@@ -475,4 +502,3 @@ function escapeXml(value: string) {
     }
   });
 }
-

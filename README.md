@@ -86,14 +86,19 @@ npm run dev -- --host 0.0.0.0
 3. 如果您使用自定义的 API 基础 URL，请在执行 `npm run dev` 前设置 `VITE_API_BASE_URL`（例如 `http://<您的-IP>:8000`）。
 4. 如果需要自定义 CORS 源，请在后端设置 `AIGC_CORS_ORIGINS`（逗号分隔）或 `AIGC_CORS_ORIGIN_REGEX`。
 
-### SiliconFlow（可选：用于 LLM 生成表单/多轮对话）
+### SiliconFlow（可选：用于 LLM/生图）
 
 “AI 场景生成 · Chat”支持通过 SiliconFlow（OpenAI 兼容的 Chat Completions）生成选择题表单，并支持多轮对话。如果未配置，会自动使用本地兜底表单/回复。
+`/generate-image` 默认使用 SiliconFlow 生图 API；如需切回本地 Diffusers，可设置 `IMAGE_GENERATION_PROVIDER=local`（或 `auto` 自动选择）。
 
 * **必需**：`SILICONFLOW_API_KEY`
-* **可选**：
+* **可选（聊天）**：
   * `SILICONFLOW_BASE_URL`（默认：`https://api.siliconflow.cn/v1/chat/completions`）
   * `SILICONFLOW_MODEL`（默认：`Qwen/Qwen2.5-7B-Instruct`）
+* **可选（生图）**：
+  * `IMAGE_GENERATION_PROVIDER`（`siliconflow`/`local`/`auto`，默认：有 `SILICONFLOW_API_KEY` 时为 `siliconflow`）
+  * `SILICONFLOW_IMAGE_BASE_URL`（默认：`https://api.siliconflow.cn/v1`）
+  * `SILICONFLOW_IMAGE_MODEL`（默认：`Qwen/Qwen-Image`）
 
 ---
 

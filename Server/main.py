@@ -41,6 +41,8 @@ caption_status = {
 
 BASE_MODEL_DEFAULT = "runwayml/stable-diffusion-v1-5"
 DISABLE_SAFETY_CHECKER = True
+LAYOUT_SCHEMA_VERSION = "1.1"
+IMAGE_PROVIDER_ENV = "IMAGE_GENERATION_PROVIDER"
 _pipe_cache = {
     "base_model": None,
     "pipe": None,
@@ -127,6 +129,7 @@ class ImageRequest(BaseModel):
     height: Optional[int] = 512
     num_inference_steps: Optional[int] = 30
     guidance_scale: Optional[float] = 7.5
+    image_provider: Optional[str] = None
 
 
 class LayoutRequest(BaseModel):
@@ -223,6 +226,75 @@ def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> s
     )
 
 
+def _resolve_image_provider(requested: Optional[str]) -> str:
+    provider = (requested or os.getenv(IMAGE_PROVIDER_ENV, "")).strip().lower()
+    if not provider:
+        provider = "siliconflow" if _siliconflow_enabled() else "local"
+    if provider == "auto":
+        return "siliconflow" if _siliconflow_enabled() else "local"
+    if provider not in {"siliconflow", "local"}:
+        raise RuntimeError(f"不支持的生图链路：{provider}")
+    if provider == "siliconflow" and not _siliconflow_enabled():
+        raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+    return provider
+
+
+def _call_siliconflow_image(prompt: str, width: int, height: int, steps: int, timeout_seconds: int = 120) -> str:
+    """
+    SiliconFlow image generation (OpenAI-compatible).
+    Env:
+      - SILICONFLOW_API_KEY (required)
+      - SILICONFLOW_IMAGE_BASE_URL (optional, default https://api.siliconflow.cn/v1)
+      - SILICONFLOW_IMAGE_MODEL (optional, default Qwen/Qwen-Image)
+    """
+    api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+    base_url = os.getenv("SILICONFLOW_IMAGE_BASE_URL", "").strip() or "https://api.siliconflow.cn/v1"
+    base_url = base_url.rstrip("/")
+    model = os.getenv("SILICONFLOW_IMAGE_MODEL", "").strip() or "Qwen/Qwen-Image"
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": f"{width}x{height}",
+        "n": 1,
+        "response_format": "b64_json",
+        "extra_body": {"step": steps},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url}/images/generations",
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"SiliconFlow 生图失败: {body}") from e
+
+    parsed = json.loads(body)
+    items = parsed.get("data") or []
+    if not items:
+        raise RuntimeError("SiliconFlow 未返回图片数据")
+    item = items[0] or {}
+    image_b64 = item.get("b64_json")
+    if image_b64:
+        return image_b64
+    url = item.get("url")
+    if url:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+            image_bytes = response.read()
+        return base64.b64encode(image_bytes).decode("utf-8")
+    raise RuntimeError("SiliconFlow 返回数据缺少 b64_json/url")
+
+
 def _safe_parse_json_object(text: str) -> dict:
     if not text:
         return {}
@@ -248,6 +320,58 @@ def _coerce_options(value) -> List[str]:
         parts = re.split(r"[,，、;\n；]+", value)
         return [p.strip() for p in parts if p.strip()]
     return []
+
+
+def _coerce_number(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1", "on"):
+            return True
+        if lowered in ("false", "no", "0", "off"):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _coerce_palette_options(value) -> List[dict]:
+    if not isinstance(value, list):
+        return []
+    options = []
+    for raw in value:
+        if isinstance(raw, dict):
+            raw_value = raw.get("value") or raw.get("label") or raw.get("color")
+            if not raw_value:
+                continue
+            entry = {"value": str(raw_value).strip()}
+            label = raw.get("label")
+            if isinstance(label, str) and label.strip():
+                entry["label"] = label.strip()
+            color = raw.get("color")
+            if isinstance(color, str) and color.strip():
+                entry["color"] = color.strip()
+            options.append(entry)
+        else:
+            text = str(raw).strip()
+            if not text:
+                continue
+            options.append({"value": text, "label": text})
+    return options[:10]
 
 
 def _normalize_form_sections(form_value) -> List[dict]:
@@ -562,12 +686,22 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             "sourcePrompt": prompt,
             "summary": summary,
             "aspect_ratio": aspect_ratio,
+            "aspect_ratio_field": "scene-aspect",
+            "schema_version": LAYOUT_SCHEMA_VERSION,
         },
         "sections": [
             {
                 "id": "base",
                 "title": "基础设置",
                 "components": [
+                    {
+                        "id": "scene-aspect",
+                        "type": "ratio-select",
+                        "label": "画幅比例",
+                        "options": ["3:4", "1:1", "16:9", "9:16"],
+                        "default": aspect_ratio,
+                        "helperText": "用于预览与导出比例",
+                    },
                     {
                         "id": "scene-title",
                         "type": "text-input",
@@ -594,6 +728,77 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                         "type": "textarea",
                         "label": "补充描述",
                         "placeholder": "补充材质、色彩、光照等细节",
+                    },
+                ],
+            },
+            {
+                "id": "prompt",
+                "title": "提示词",
+                "components": [
+                    {
+                        "id": "prompt-editor",
+                        "type": "prompt-editor",
+                        "title": "提示词编辑",
+                        "fields": [
+                            {
+                                "id": "positive",
+                                "label": "正向提示词",
+                                "placeholder": "主体、风格、氛围、镜头、材质",
+                                "default": prompt,
+                            },
+                            {
+                                "id": "negative",
+                                "label": "负向提示词",
+                                "placeholder": "不需要出现的元素",
+                                "default": "",
+                            },
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "generation",
+                "title": "生成参数",
+                "components": [
+                    {
+                        "id": "cfg-scale",
+                        "type": "slider",
+                        "label": "提示词强度",
+                        "min": 3,
+                        "max": 12,
+                        "step": 0.5,
+                        "default": 7,
+                        "helperText": "数值越高越贴合描述，但可能损失多样性",
+                    },
+                    {
+                        "id": "steps",
+                        "type": "number-input",
+                        "label": "推理步数",
+                        "min": 10,
+                        "max": 60,
+                        "step": 1,
+                        "default": 28,
+                        "unit": "步",
+                        "helperText": "步数越高越细腻，但耗时更长",
+                    },
+                    {
+                        "id": "seed-lock",
+                        "type": "toggle",
+                        "label": "固定随机种子",
+                        "default": False,
+                        "helperText": "开启后多次生成更稳定",
+                    },
+                    {
+                        "id": "color-tone",
+                        "type": "color-palette",
+                        "label": "主色调",
+                        "options": [
+                            {"value": "暖色", "label": "暖色", "color": "#F4A261"},
+                            {"value": "冷色", "label": "冷色", "color": "#5DADE2"},
+                            {"value": "高对比", "label": "高对比", "color": "#1F1F1F"},
+                            {"value": "粉彩", "label": "粉彩", "color": "#F7C7D9"},
+                        ],
+                        "default": "暖色",
                     },
                 ],
             },
@@ -634,15 +839,104 @@ def _normalize_layer_type(raw_type: Optional[str], label: str) -> str:
     return "subject"
 
 
+def _ensure_unique_id(raw_id: str, used_ids: set, fallback_prefix: str) -> str:
+    base = str(raw_id).strip() if raw_id is not None else ""
+    if not base:
+        base = f"{fallback_prefix}-{len(used_ids) + 1}"
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _normalize_number_range(min_val, max_val, step_val, default_val) -> dict:
+    min_num = _coerce_number(min_val)
+    max_num = _coerce_number(max_val)
+    step_num = _coerce_number(step_val)
+    default_num = _coerce_number(default_val)
+
+    if min_num is None and max_num is None:
+        min_num, max_num = 0.0, 1.0
+    elif min_num is None:
+        min_num = 0.0
+    elif max_num is None:
+        max_num = min_num + 1.0
+
+    if max_num < min_num:
+        min_num, max_num = max_num, min_num
+
+    span = max_num - min_num
+    if step_num is None or step_num <= 0:
+        if span >= 10:
+            step_num = 1.0
+        elif span <= 1:
+            step_num = 0.05
+        else:
+            step_num = round(span / 10, 2)
+
+    if default_num is None:
+        default_num = min_num
+    if default_num < min_num:
+        default_num = min_num
+    if default_num > max_num:
+        default_num = max_num
+
+    return {"min": min_num, "max": max_num, "step": step_num, "default": default_num}
+
+
+def _sanitize_prompt_fields(raw_fields, base_prompt: str) -> List[dict]:
+    fields = []
+    used_ids: set = set()
+    if isinstance(raw_fields, list):
+        for idx, field in enumerate(raw_fields):
+            if not isinstance(field, dict):
+                continue
+            field_id = _ensure_unique_id(field.get("id") or f"field-{idx + 1}", used_ids, "field")
+            label = field.get("label")
+            placeholder = field.get("placeholder")
+            default = field.get("default")
+            helper_text = field.get("helperText")
+            entry = {"id": field_id}
+            if isinstance(label, str) and label.strip():
+                entry["label"] = label.strip()
+            if isinstance(placeholder, str) and placeholder.strip():
+                entry["placeholder"] = placeholder.strip()
+            if isinstance(helper_text, str) and helper_text.strip():
+                entry["helperText"] = helper_text.strip()
+            if default is not None:
+                entry["default"] = str(default)
+            fields.append(entry)
+    if not fields:
+        fields = [
+            {
+                "id": "positive",
+                "label": "正向提示词",
+                "placeholder": "主体、风格、氛围、细节",
+                "default": base_prompt or "",
+            },
+            {
+                "id": "negative",
+                "label": "负向提示词",
+                "placeholder": "不希望出现的元素",
+                "default": "",
+            },
+        ]
+    return fields
+
+
 def _sanitize_slots(raw_slots, base_prompt: str, style: str, moods: List[str]) -> List[dict]:
     if not isinstance(raw_slots, list):
         return []
     slots = []
+    used_ids: set = set()
     slot_prompt = _compose_slot_prompt(base_prompt, style, moods)
     for idx, slot in enumerate(raw_slots):
         if not isinstance(slot, dict):
             continue
-        slot_id = slot.get("id") or f"slot-{idx + 1}"
+        slot_id = _ensure_unique_id(slot.get("id") or f"slot-{idx + 1}", used_ids, "slot")
         label = slot.get("label")
         label = label.strip() if isinstance(label, str) and label.strip() else f"素材 {idx + 1}"
         prompt = slot.get("prompt")
@@ -657,10 +951,11 @@ def _sanitize_slots(raw_slots, base_prompt: str, style: str, moods: List[str]) -
             }
         )
     if slots and not any(slot["layerType"] == "background" for slot in slots):
+        background_id = _ensure_unique_id("background", used_ids, "slot")
         slots.insert(
             0,
             {
-                "id": "background",
+                "id": background_id,
                 "label": "背景",
                 "layerType": "background",
                 "prompt": f"{slot_prompt}，背景",
@@ -669,25 +964,41 @@ def _sanitize_slots(raw_slots, base_prompt: str, style: str, moods: List[str]) -
     return slots
 
 
-def _sanitize_components(raw_components, base_prompt: str, style: str, moods: List[str]) -> List[dict]:
+def _sanitize_components(raw_components, base_prompt: str, style: str, moods: List[str], used_ids: Optional[set] = None) -> List[dict]:
     if not isinstance(raw_components, list):
         return []
-    allowed = {"text-input", "textarea", "select", "multi-select", "media-uploader"}
+    allowed = {
+        "text-input",
+        "textarea",
+        "select",
+        "multi-select",
+        "media-uploader",
+        "number-input",
+        "slider",
+        "toggle",
+        "ratio-select",
+        "color-palette",
+        "prompt-editor",
+    }
     components = []
+    used_ids = used_ids or set()
     for idx, comp in enumerate(raw_components):
         if not isinstance(comp, dict):
             continue
         comp_type = comp.get("type")
         if comp_type not in allowed:
             continue
-        comp_id = comp.get("id") or f"{comp_type}-{idx + 1}"
-        base = {"id": str(comp_id), "type": comp_type}
+        comp_id = _ensure_unique_id(comp.get("id") or f"{comp_type}-{idx + 1}", used_ids, "component")
+        base = {"id": comp_id, "type": comp_type}
         label = comp.get("label")
         if isinstance(label, str) and label.strip():
             base["label"] = label.strip()
         title = comp.get("title")
         if isinstance(title, str) and title.strip():
             base["title"] = title.strip()
+        helper_text = comp.get("helperText")
+        if isinstance(helper_text, str) and helper_text.strip():
+            base["helperText"] = helper_text.strip()
 
         if comp_type in ("text-input", "textarea"):
             placeholder = comp.get("placeholder")
@@ -696,13 +1007,13 @@ def _sanitize_components(raw_components, base_prompt: str, style: str, moods: Li
             default = comp.get("default")
             if default is not None:
                 base["default"] = str(default)
-        elif comp_type in ("select", "multi-select"):
+        elif comp_type in ("select", "multi-select", "ratio-select"):
             options = _coerce_options(comp.get("options"))
             if not options:
                 continue
-            base["options"] = options[:6]
+            base["options"] = options[:8]
             default = comp.get("default")
-            if comp_type == "select":
+            if comp_type in ("select", "ratio-select"):
                 if isinstance(default, str) and default in options:
                     base["default"] = default
                 else:
@@ -711,11 +1022,51 @@ def _sanitize_components(raw_components, base_prompt: str, style: str, moods: Li
                 if isinstance(default, list):
                     selected = [str(v).strip() for v in default if str(v).strip() and str(v).strip() in options]
                     base["default"] = selected
+        elif comp_type == "color-palette":
+            options = _coerce_palette_options(comp.get("options"))
+            if not options:
+                continue
+            base["options"] = options
+            allow_multiple = _coerce_bool(comp.get("allowMultiple"), default=False)
+            if allow_multiple:
+                base["allowMultiple"] = True
+            default = comp.get("default")
+            if allow_multiple:
+                if isinstance(default, list):
+                    base["default"] = [str(v).strip() for v in default if str(v).strip()]
+            else:
+                if isinstance(default, str):
+                    base["default"] = default
+                else:
+                    base["default"] = options[0].get("value")
+        elif comp_type in ("number-input", "slider"):
+            range_config = _normalize_number_range(
+                comp.get("min"),
+                comp.get("max"),
+                comp.get("step"),
+                comp.get("default"),
+            )
+            base.update(range_config)
+            unit = comp.get("unit")
+            if isinstance(unit, str) and unit.strip():
+                base["unit"] = unit.strip()
+        elif comp_type == "toggle":
+            base["default"] = _coerce_bool(comp.get("default"), default=False)
+        elif comp_type == "prompt-editor":
+            fields = _sanitize_prompt_fields(comp.get("fields"), base_prompt)
+            if not fields:
+                continue
+            base["fields"] = fields
         elif comp_type == "media-uploader":
             slots = _sanitize_slots(comp.get("slots"), base_prompt, style, moods)
             if not slots:
                 continue
             base["slots"] = slots
+            max_val = _coerce_number(comp.get("max"))
+            if isinstance(max_val, float) and max_val > 0:
+                base["max"] = int(max_val)
+            if _coerce_bool(comp.get("required"), default=False):
+                base["required"] = True
         components.append(base)
     return components
 
@@ -740,17 +1091,21 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
 
     sanitized_sections = []
     has_media = False
+    used_section_ids: set = set()
+    used_component_ids: set = set()
+    ratio_component_ids: List[str] = []
     for idx, section in enumerate(sections):
         if not isinstance(section, dict):
             continue
-        section_id = section.get("id") or f"section-{idx + 1}"
+        section_id = _ensure_unique_id(section.get("id") or f"section-{idx + 1}", used_section_ids, "section")
         title = section.get("title")
         title = title.strip() if isinstance(title, str) and title.strip() else None
-        components = _sanitize_components(section.get("components"), base_prompt, style_default, mood_defaults)
+        components = _sanitize_components(section.get("components"), base_prompt, style_default, mood_defaults, used_ids=used_component_ids)
         if not components:
             continue
         if any(comp.get("type") == "media-uploader" for comp in components):
             has_media = True
+        ratio_component_ids.extend([comp["id"] for comp in components if comp.get("type") == "ratio-select"])
         entry = {"id": str(section_id), "components": components}
         if title:
             entry["title"] = title
@@ -761,11 +1116,19 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
 
     meta = layout.get("meta") if isinstance(layout.get("meta"), dict) else {}
     meta.setdefault("sourcePrompt", base_prompt)
+    meta["schema_version"] = LAYOUT_SCHEMA_VERSION
     if not isinstance(meta.get("summary"), str) or not meta.get("summary", "").strip():
         meta["summary"] = fallback.get("layout_config", {}).get("meta", {}).get("summary", "")
     aspect = meta.get("aspect_ratio")
     if not isinstance(aspect, str) or not aspect.strip():
         meta["aspect_ratio"] = _infer_aspect_ratio(base_prompt, selected_options)
+    aspect_field = meta.get("aspect_ratio_field")
+    if isinstance(aspect_field, str) and aspect_field in used_component_ids:
+        meta["aspect_ratio_field"] = aspect_field
+    elif ratio_component_ids:
+        meta["aspect_ratio_field"] = ratio_component_ids[0]
+    else:
+        meta.pop("aspect_ratio_field", None)
     return {"text_response": text.strip(), "layout_config": {"meta": meta, "sections": sanitized_sections}}
 
 
@@ -778,10 +1141,14 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
     system = (
         "你是 AIGC 配置页生成器。请根据用户需求生成“专属编辑布局”。\n"
         "输出必须是单个 JSON 对象，仅包含字段：text_response(string), layout_config(object)。\n"
-        "layout_config.meta 包含 sourcePrompt, summary, aspect_ratio。\n"
+        f"layout_config.meta 包含 sourcePrompt, summary, aspect_ratio, schema_version(固定为 {LAYOUT_SCHEMA_VERSION})，可选 aspect_ratio_field。\n"
         "layout_config.sections 为数组，每项包含 id, title, components。\n"
-        "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader。\n"
-        "select/multi-select 需要 options(string[])。\n"
+        "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader, number-input, slider, toggle, ratio-select, color-palette, prompt-editor。\n"
+        "select/multi-select/ratio-select 需要 options(string[])。\n"
+        "number-input/slider 可包含 min/max/step/default/unit/helperText。\n"
+        "toggle 可包含 default(boolean)/helperText。\n"
+        "color-palette 需要 options，支持 string 或 {value,label,color}。\n"
+        "prompt-editor 需要 fields，fields 为 {id,label,placeholder,default,helperText}。\n"
         "media-uploader 需要 slots，每个 slot 包含 id, label, layerType(background|subject|decor), prompt。\n"
         "请使用中文，不要包含多余解释或 Markdown。"
     )
@@ -1235,13 +1602,19 @@ def generate_image(req: ImageRequest):
     height = max(256, (height // 8) * 8)
     steps = max(10, min(req.num_inference_steps or 30, 100))
 
-    base_model_id = req.base_model or BASE_MODEL_DEFAULT
-    lora_models = req.lora_models or []
-    lora_models = [name for name in lora_models if name and name != "None"]
-    lora_models = list(dict.fromkeys(lora_models))
-
     pipe = None
+    lora_models: List[str] = []
     try:
+        provider = _resolve_image_provider(req.image_provider)
+        if provider == "siliconflow":
+            image_b64 = _call_siliconflow_image(req.prompt, width, height, steps)
+            return {"image_base64": image_b64}
+
+        base_model_id = req.base_model or BASE_MODEL_DEFAULT
+        lora_models = req.lora_models or []
+        lora_models = [name for name in lora_models if name and name != "None"]
+        lora_models = list(dict.fromkeys(lora_models))
+
         with _pipe_lock:
             pipe = _ensure_pipe(base_model_id)
 
