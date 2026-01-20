@@ -20,6 +20,7 @@ import ModelTrainingIcon from '@mui/icons-material/ModelTraining';
 import ImagesearchRollerIcon from '@mui/icons-material/ImagesearchRoller';
 import StorageIcon from '@mui/icons-material/Storage';
 import BrushIcon from '@mui/icons-material/Brush';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 
 const drawerWidth = 240;
 
@@ -36,6 +37,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   };
 
   const menuItems = [
+    { text: 'AI 场景生成', path: '/scene/chat', icon: <AutoAwesomeIcon /> },
     { text: 'LoRA 训练', path: '/', icon: <ModelTrainingIcon /> },
     { text: '推理生成', path: '/inference', icon: <ImagesearchRollerIcon /> },
     { text: '训练模型', path: '/models', icon: <StorageIcon /> },

@@ -10,8 +10,12 @@ import json
 import re
 from datetime import datetime
 import io
+import base64
+import urllib.request
+import urllib.error
 from diffusers import DiffusionPipeline
 from threading import Lock
+from PIL import Image, ImageDraw, ImageFont
 
 from .train_lora import TrainingConfig, start_training as run_lora_training
 from .captioning import caption_images
@@ -43,6 +47,47 @@ _pipe_cache = {
 }
 _pipe_lock = Lock()
 
+
+def _ensure_pipe(base_model_id: str):
+    if _pipe_cache["pipe"] is None or _pipe_cache["base_model"] != base_model_id:
+        if _pipe_cache["pipe"] is not None:
+            try:
+                _pipe_cache["pipe"].unload_lora_weights()
+            except Exception:
+                pass
+            del _pipe_cache["pipe"]
+            _pipe_cache["pipe"] = None
+            torch.cuda.empty_cache()
+            if torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except AttributeError:
+                    pass
+
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        pipe = DiffusionPipeline.from_pretrained(
+            base_model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+        )
+        if DISABLE_SAFETY_CHECKER:
+            pipe.safety_checker = None
+            if hasattr(pipe, "feature_extractor"):
+                pipe.feature_extractor = None
+        if device != "cpu":
+            pipe = pipe.to(device)
+        pipe.enable_attention_slicing()
+        _pipe_cache["pipe"] = pipe
+        _pipe_cache["base_model"] = base_model_id
+    return _pipe_cache["pipe"]
+
 # --- CORS Middleware ---
 # Allow LAN access by default while keeping localhost whitelisted.
 default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -68,6 +113,701 @@ class GenerateRequest(BaseModel):
     lora_models: Optional[List[str]] = None
     lora_model: Optional[str] = None # Backward compat for single LoRA
 
+
+class TextRequest(BaseModel):
+    prompt: str
+
+
+class ImageRequest(BaseModel):
+    prompt: str
+    negative_prompt: Optional[str] = None
+    base_model: Optional[str] = None
+    lora_models: Optional[List[str]] = None
+    width: Optional[int] = 512
+    height: Optional[int] = 512
+    num_inference_steps: Optional[int] = 30
+    guidance_scale: Optional[float] = 7.5
+
+
+class LayoutRequest(BaseModel):
+    prompt: str
+    chat_history: Optional[str] = None
+    selected_options: Optional[dict] = None
+
+
+class LayeredRequest(BaseModel):
+    prompt: str
+    aspect_ratio: Optional[str] = "3:4"
+    count: Optional[int] = 3  # total layers including background
+
+
+@app.post("/generate-json")
+def generate_json(req: TextRequest):
+    """LiteDraw-compatible: return a JSON object with text_response + form choices."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    result = generate_llm_form(req.prompt)
+    return {"json_object": result}
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    selected_options: Optional[dict] = None
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    """Multi-turn chat with optional form generation; returns LiteDraw-like JSON payload."""
+    if not req.messages:
+        return JSONResponse(status_code=400, content={"error": "messages 不能为空"})
+    selected_options = req.selected_options or {}
+    result = generate_llm_chat(req.messages, selected_options=selected_options)
+
+    # Ensure the very first turn has a form (LiteDraw expectation).
+    user_messages = [m for m in req.messages if (m.role or "").lower() == "user"]
+    should_force_form = len(user_messages) <= 1 and not selected_options
+    if should_force_form and not (result.get("form") or []):
+        last_user_prompt = user_messages[-1].content if user_messages else ""
+        if last_user_prompt:
+            result = generate_llm_form(last_user_prompt)
+    return {"json_object": result}
+
+
+def _siliconflow_enabled() -> bool:
+    return bool(os.getenv("SILICONFLOW_API_KEY", "").strip())
+
+
+def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
+    """
+    Minimal SiliconFlow chat-completions call.
+    Env:
+      - SILICONFLOW_API_KEY (required)
+      - SILICONFLOW_BASE_URL (optional, default OpenAI-compatible endpoint)
+      - SILICONFLOW_MODEL (optional)
+    """
+    api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+    base_url = os.getenv("SILICONFLOW_BASE_URL", "").strip() or "https://api.siliconflow.cn/v1/chat/completions"
+    model = os.getenv("SILICONFLOW_MODEL", "").strip() or "Qwen/Qwen2.5-7B-Instruct"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4,
+        "response_format": {"type": "json_object"},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base_url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    parsed = json.loads(body)
+    # OpenAI-compatible: choices[0].message.content
+    return (
+        parsed.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+
+
+def _safe_parse_json_object(text: str) -> dict:
+    if not text:
+        return {}
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Attempt to extract the first {...} block.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+
+def _coerce_options(value) -> List[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        parts = re.split(r"[,，、;\n；]+", value)
+        return [p.strip() for p in parts if p.strip()]
+    return []
+
+
+def _normalize_form_sections(form_value) -> List[dict]:
+    if not isinstance(form_value, list):
+        return []
+    normalized: List[dict] = []
+    for idx, item in enumerate(form_value):
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        title = title.strip() if isinstance(title, str) and title.strip() else f"问题 {idx + 1}"
+        options = _coerce_options(item.get("options"))
+        options = list(dict.fromkeys([opt for opt in options if opt]))[:6]
+        if len(options) < 1:
+            continue
+        normalized.append({"title": title, "options": options})
+    return normalized[:4]
+
+
+def _normalize_llm_payload(obj: dict, default_text: str) -> dict:
+    if not isinstance(obj, dict):
+        return {"text_response": default_text, "form": []}
+    text = obj.get("text_response")
+    if not isinstance(text, str) or not text.strip():
+        text = default_text
+    form = _normalize_form_sections(obj.get("form"))
+    return {"text_response": text.strip(), "form": form}
+
+
+def generate_llm_form(user_prompt: str) -> dict:
+    """Generate initial form. Falls back to static form when SiliconFlow is unavailable."""
+    fallback = {
+        "text_response": "好的！为了更接近你想要的效果，请先选几项偏好：",
+        "form": [
+            {"title": "画幅比例", "options": ["3:4", "1:1", "16:9"]},
+            {"title": "风格方向", "options": ["摄影", "插画", "3D 渲染", "平面海报"]},
+            {"title": "氛围", "options": ["明亮清爽", "暗黑电影感", "梦幻柔光", "复古胶片"]},
+        ],
+    }
+    if not _siliconflow_enabled():
+        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用本地兜底表单）"
+        return fallback
+
+    system = (
+        "你是一个文生图应用的对话助手。任务：根据用户的初始想法生成 2-4 个选择题表单，用于澄清需求。\n"
+        "输出必须是单个 JSON 对象，且只包含这些字段：text_response(string), form(array).\n"
+        "form 中每一项为 {title: string, options: string[]}，options 2-4 个，高层抽象，不要数值参数。\n"
+        "全部用中文。"
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"用户想生成：{user_prompt}"},
+    ]
+    try:
+        content = _call_siliconflow_chat(messages)
+        obj = _safe_parse_json_object(content)
+        normalized = _normalize_llm_payload(obj, default_text=fallback["text_response"])
+        if normalized.get("form"):
+            return normalized
+    except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as e:
+        fallback["text_response"] += f"（SiliconFlow 调用失败：{e}，使用本地兜底表单）"
+        return fallback
+    except Exception as e:
+        fallback["text_response"] += f"（SiliconFlow 未知错误：{e}，使用本地兜底表单）"
+        return fallback
+    fallback["text_response"] += "（SiliconFlow 返回格式异常，使用本地兜底表单）"
+    return fallback
+
+
+def generate_llm_chat(messages: List[ChatMessage], selected_options: dict) -> dict:
+    """
+    Multi-turn assistant. If a form has not been generated yet, generate it.
+    Otherwise respond and optionally return a refined form (can be empty).
+    """
+    fallback = {
+        "text_response": "收到。你也可以继续补充细节，或点击进入编辑界面。",
+        "form": [],
+    }
+    if not _siliconflow_enabled():
+        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用本地回复）"
+        return fallback
+
+    system = (
+        "你是一个文生图应用的对话助手。你需要进行多轮对话：\n"
+        "1) 如果用户还没完成需求澄清，请给出简短追问，并可返回 form(2-4题)；\n"
+        "2) 如果用户已给出足够信息，可只返回 text_response，form 可以为空数组。\n"
+        "输出必须是单个 JSON 对象，字段：text_response(string), form(array)。form 允许为空数组。\n"
+        "全部用中文。"
+    )
+    sf_messages = [{"role": "system", "content": system}]
+    for m in messages[-20:]:
+        role = "assistant" if m.role in ("assistant", "bot") else "user"
+        sf_messages.append({"role": role, "content": m.content})
+    sf_messages.append(
+        {"role": "user", "content": f"当前用户已选表单项(JSON)：{json.dumps(selected_options, ensure_ascii=False)}"}
+    )
+    try:
+        content = _call_siliconflow_chat(sf_messages)
+        obj = _safe_parse_json_object(content)
+        return _normalize_llm_payload(obj, default_text=fallback["text_response"])
+    except Exception:
+        return fallback
+    return fallback
+
+def _pick_selected_first(selected: dict, keys: List[str]) -> Optional[str]:
+    for key in keys:
+        value = selected.get(key)
+        if isinstance(value, list):
+            for item in value:
+                text = str(item).strip()
+                if text:
+                    return text
+        elif isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    return None
+
+
+def _pick_selected_list(selected: dict, keys: List[str]) -> List[str]:
+    for key in keys:
+        value = selected.get(key)
+        if isinstance(value, list):
+            items = [str(v).strip() for v in value if str(v).strip()]
+            if items:
+                return items
+        elif isinstance(value, str):
+            items = _coerce_options(value)
+            if items:
+                return items
+    return []
+
+
+def _format_selected_summary(selected_options: dict, limit: int = 3) -> str:
+    if not isinstance(selected_options, dict):
+        return ""
+    parts = []
+    for key, value in selected_options.items():
+        if not key:
+            continue
+        if isinstance(value, list):
+            values = [str(v).strip() for v in value if str(v).strip()]
+            if not values:
+                continue
+            parts.append(f"{key}:{'、'.join(values)}")
+        elif isinstance(value, str) and value.strip():
+            parts.append(f"{key}:{value.strip()}")
+        if len(parts) >= limit:
+            break
+    return "；".join(parts)
+
+
+def _infer_aspect_ratio(prompt: str, selected: dict) -> str:
+    selected_ratio = _pick_selected_first(selected, ["画幅比例", "比例", "画幅", "比例选择"])
+    if isinstance(selected_ratio, str) and ":" in selected_ratio:
+        return selected_ratio.strip()
+    if prompt:
+        if re.search(r"(横版|横向|横幅|宽屏|16:9|电影|宽画幅)", prompt, re.IGNORECASE):
+            return "16:9"
+        if re.search(r"(方形|正方形|1:1)", prompt):
+            return "1:1"
+        if re.search(r"(竖版|竖向|海报|长图|9:16|4:5|3:4)", prompt):
+            return "3:4"
+    return "3:4"
+
+
+def _infer_style(prompt: str) -> str:
+    if not prompt:
+        return "摄影"
+    if re.search(r"(插画|漫画|手绘|绘本)", prompt):
+        return "插画"
+    if re.search(r"(3d|建模|渲染)", prompt, re.IGNORECASE):
+        return "3D 渲染"
+    if re.search(r"(海报|banner|平面|宣传)", prompt, re.IGNORECASE):
+        return "平面海报"
+    if re.search(r"(摄影|照片|写实|realistic)", prompt, re.IGNORECASE):
+        return "摄影"
+    return "摄影"
+
+
+def _infer_moods(prompt: str) -> List[str]:
+    if not prompt:
+        return ["明亮清爽"]
+    moods = []
+    if re.search(r"(明亮|清新|阳光|通透|清爽)", prompt):
+        moods.append("明亮清爽")
+    if re.search(r"(暗黑|夜|阴影|电影感|暗调)", prompt):
+        moods.append("暗黑电影感")
+    if re.search(r"(梦幻|柔光|仙|童话|迷幻)", prompt):
+        moods.append("梦幻柔光")
+    if re.search(r"(复古|胶片|怀旧|老照片)", prompt):
+        moods.append("复古胶片")
+    return moods or ["明亮清爽"]
+
+
+def _infer_subject_count(prompt: str) -> int:
+    if not prompt:
+        return 2
+    if re.search(r"(多人|群像|人群|群体|大量)", prompt):
+        return 3
+    if re.search(r"(三|3)\s*(人|个|位|只|件|主体|主角)", prompt):
+        return 3
+    if re.search(r"(两|双|2)\s*(人|个|位|只|件|主体|主角)", prompt):
+        return 2
+    if re.search(r"(一|单|1)\s*(人|个|位|只|件|主体|主角)", prompt):
+        return 1
+    if re.search(r"(单人|单体|独立主体|一个人|一人)", prompt):
+        return 1
+    if re.search(r"(二人|两人|双人)", prompt):
+        return 2
+    if re.search(r"(三人)", prompt):
+        return 3
+    return 2
+
+
+def _infer_subject_label(prompt: str) -> str:
+    if not prompt:
+        return "主体"
+    if re.search(r"(人物|人像|模特|男|女|儿童|老人|角色|演员)", prompt):
+        return "人物"
+    if re.search(r"(动物|猫|狗|鸟|马|鹿)", prompt):
+        return "主角"
+    return "主体"
+
+
+def _needs_decor_slot(prompt: str, style: str) -> bool:
+    if style == "平面海报":
+        return True
+    if not prompt:
+        return False
+    return bool(re.search(r"(logo|LOGO|标志|标识|文字|文案|标题|海报|banner|宣传|广告|排版)", prompt))
+
+
+def _compose_slot_prompt(prompt: str, style: str, moods: List[str]) -> str:
+    parts = []
+    base = (prompt or "").strip()
+    if base:
+        parts.append(base)
+    if style:
+        parts.append(f"风格{style}")
+    if moods:
+        parts.append(f"氛围{'/'.join(moods)}")
+    return "，".join(parts)
+
+
+def _merge_options(base: List[str], additions: List[str]) -> List[str]:
+    merged = list(base)
+    for item in additions:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selected_options: Optional[dict]) -> dict:
+    selected = selected_options or {}
+    aspect_ratio = _infer_aspect_ratio(prompt, selected)
+    style_options = ["摄影", "插画", "3D 渲染", "平面海报"]
+    mood_options = ["明亮清爽", "暗黑电影感", "梦幻柔光", "复古胶片"]
+
+    selected_style = _pick_selected_first(selected, ["风格", "风格方向"])
+    style_default = selected_style or _infer_style(prompt)
+    style_options = _merge_options(style_options, [style_default])
+
+    selected_moods = _pick_selected_list(selected, ["氛围", "情绪氛围", "情绪", "氛围关键词"])
+    mood_defaults = selected_moods or _infer_moods(prompt)
+    mood_options = _merge_options(mood_options, mood_defaults)
+
+    subject_count = _infer_subject_count(prompt)
+    subject_label = _infer_subject_label(prompt)
+    include_decor = _needs_decor_slot(prompt, style_default)
+    slot_prompt = _compose_slot_prompt(prompt, style_default, mood_defaults)
+
+    slots = [
+        {
+            "id": "background",
+            "label": "背景",
+            "layerType": "background",
+            "prompt": f"{slot_prompt}，背景",
+        }
+    ]
+    for idx in range(subject_count):
+        label = subject_label if subject_count == 1 else f"{subject_label} {idx + 1}"
+        slots.append(
+            {
+                "id": f"subject-{idx + 1}",
+                "label": label,
+                "layerType": "subject",
+                "prompt": f"{slot_prompt}，{label}",
+            }
+        )
+    if include_decor:
+        slots.append(
+            {
+                "id": "decor-1",
+                "label": "文字/装饰",
+                "layerType": "decor",
+                "prompt": f"{slot_prompt}，文字或装饰元素",
+            }
+        )
+
+    selected_summary = _format_selected_summary(selected, limit=3)
+    summary = f"为「{prompt}」生成的专属配置页"
+    if selected_summary:
+        summary = f"{summary}（已结合 {selected_summary}）"
+
+    text_response = f"已根据你的需求生成编辑页：{prompt}。"
+    if selected_summary:
+        text_response = f"{text_response} 当前选项：{selected_summary}。"
+
+    layout_config = {
+        "meta": {
+            "sourcePrompt": prompt,
+            "summary": summary,
+            "aspect_ratio": aspect_ratio,
+        },
+        "sections": [
+            {
+                "id": "base",
+                "title": "基础设置",
+                "components": [
+                    {
+                        "id": "scene-title",
+                        "type": "text-input",
+                        "label": "场景名称",
+                        "placeholder": "例如：未来城市夜景",
+                        "default": prompt[:20] if prompt else "",
+                    },
+                    {
+                        "id": "scene-style",
+                        "type": "select",
+                        "label": "风格方向",
+                        "options": style_options,
+                        "default": style_default,
+                    },
+                    {
+                        "id": "scene-mood",
+                        "type": "multi-select",
+                        "label": "情绪氛围",
+                        "options": mood_options,
+                        "default": mood_defaults,
+                    },
+                    {
+                        "id": "scene-notes",
+                        "type": "textarea",
+                        "label": "补充描述",
+                        "placeholder": "补充材质、色彩、光照等细节",
+                    },
+                ],
+            },
+            {
+                "id": "materials",
+                "title": "素材准备",
+                "components": [
+                    {
+                        "id": "materials-uploader",
+                        "type": "media-uploader",
+                        "title": "上传或生成素材",
+                        "required": True,
+                        "max": max(1, len(slots)),
+                        "slots": slots,
+                    }
+                ],
+            },
+        ],
+    }
+    return {"text_response": text_response, "layout_config": layout_config}
+
+
+def _normalize_layer_type(raw_type: Optional[str], label: str) -> str:
+    if isinstance(raw_type, str):
+        value = raw_type.strip().lower()
+        if value in ("background", "subject", "decor"):
+            return value
+        if "bg" in value or "背景" in raw_type:
+            return "background"
+        if "decor" in value or "装饰" in raw_type or "文字" in raw_type or "logo" in raw_type.lower():
+            return "decor"
+        if "subject" in value or "主体" in raw_type or "人物" in raw_type:
+            return "subject"
+    if label and "背景" in label:
+        return "background"
+    if label and any(k in label for k in ["文字", "logo", "标语", "装饰"]):
+        return "decor"
+    return "subject"
+
+
+def _sanitize_slots(raw_slots, base_prompt: str, style: str, moods: List[str]) -> List[dict]:
+    if not isinstance(raw_slots, list):
+        return []
+    slots = []
+    slot_prompt = _compose_slot_prompt(base_prompt, style, moods)
+    for idx, slot in enumerate(raw_slots):
+        if not isinstance(slot, dict):
+            continue
+        slot_id = slot.get("id") or f"slot-{idx + 1}"
+        label = slot.get("label")
+        label = label.strip() if isinstance(label, str) and label.strip() else f"素材 {idx + 1}"
+        prompt = slot.get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) and prompt.strip() else slot_prompt
+        layer_type = _normalize_layer_type(slot.get("layerType"), label)
+        slots.append(
+            {
+                "id": str(slot_id),
+                "label": label,
+                "layerType": layer_type,
+                "prompt": prompt,
+            }
+        )
+    if slots and not any(slot["layerType"] == "background" for slot in slots):
+        slots.insert(
+            0,
+            {
+                "id": "background",
+                "label": "背景",
+                "layerType": "background",
+                "prompt": f"{slot_prompt}，背景",
+            },
+        )
+    return slots
+
+
+def _sanitize_components(raw_components, base_prompt: str, style: str, moods: List[str]) -> List[dict]:
+    if not isinstance(raw_components, list):
+        return []
+    allowed = {"text-input", "textarea", "select", "multi-select", "media-uploader"}
+    components = []
+    for idx, comp in enumerate(raw_components):
+        if not isinstance(comp, dict):
+            continue
+        comp_type = comp.get("type")
+        if comp_type not in allowed:
+            continue
+        comp_id = comp.get("id") or f"{comp_type}-{idx + 1}"
+        base = {"id": str(comp_id), "type": comp_type}
+        label = comp.get("label")
+        if isinstance(label, str) and label.strip():
+            base["label"] = label.strip()
+        title = comp.get("title")
+        if isinstance(title, str) and title.strip():
+            base["title"] = title.strip()
+
+        if comp_type in ("text-input", "textarea"):
+            placeholder = comp.get("placeholder")
+            if isinstance(placeholder, str) and placeholder.strip():
+                base["placeholder"] = placeholder.strip()
+            default = comp.get("default")
+            if default is not None:
+                base["default"] = str(default)
+        elif comp_type in ("select", "multi-select"):
+            options = _coerce_options(comp.get("options"))
+            if not options:
+                continue
+            base["options"] = options[:6]
+            default = comp.get("default")
+            if comp_type == "select":
+                if isinstance(default, str) and default in options:
+                    base["default"] = default
+                else:
+                    base["default"] = options[0]
+            else:
+                if isinstance(default, list):
+                    selected = [str(v).strip() for v in default if str(v).strip() and str(v).strip() in options]
+                    base["default"] = selected
+        elif comp_type == "media-uploader":
+            slots = _sanitize_slots(comp.get("slots"), base_prompt, style, moods)
+            if not slots:
+                continue
+            base["slots"] = slots
+        components.append(base)
+    return components
+
+
+def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selected_options: dict) -> dict:
+    if not isinstance(obj, dict):
+        return fallback
+    text = obj.get("text_response")
+    if not isinstance(text, str) or not text.strip():
+        text = fallback.get("text_response", "")
+    layout = obj.get("layout_config")
+    if not isinstance(layout, dict):
+        return fallback
+    sections = layout.get("sections")
+    if not isinstance(sections, list) or not sections:
+        return fallback
+
+    selected_style = _pick_selected_first(selected_options, ["风格", "风格方向"])
+    style_default = selected_style or _infer_style(base_prompt)
+    selected_moods = _pick_selected_list(selected_options, ["氛围", "情绪氛围", "情绪", "氛围关键词"])
+    mood_defaults = selected_moods or _infer_moods(base_prompt)
+
+    sanitized_sections = []
+    has_media = False
+    for idx, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        section_id = section.get("id") or f"section-{idx + 1}"
+        title = section.get("title")
+        title = title.strip() if isinstance(title, str) and title.strip() else None
+        components = _sanitize_components(section.get("components"), base_prompt, style_default, mood_defaults)
+        if not components:
+            continue
+        if any(comp.get("type") == "media-uploader" for comp in components):
+            has_media = True
+        entry = {"id": str(section_id), "components": components}
+        if title:
+            entry["title"] = title
+        sanitized_sections.append(entry)
+
+    if not sanitized_sections or not has_media:
+        return fallback
+
+    meta = layout.get("meta") if isinstance(layout.get("meta"), dict) else {}
+    meta.setdefault("sourcePrompt", base_prompt)
+    if not isinstance(meta.get("summary"), str) or not meta.get("summary", "").strip():
+        meta["summary"] = fallback.get("layout_config", {}).get("meta", {}).get("summary", "")
+    aspect = meta.get("aspect_ratio")
+    if not isinstance(aspect, str) or not aspect.strip():
+        meta["aspect_ratio"] = _infer_aspect_ratio(base_prompt, selected_options)
+    return {"text_response": text.strip(), "layout_config": {"meta": meta, "sections": sanitized_sections}}
+
+
+def generate_llm_layout(req: LayoutRequest) -> dict:
+    fallback = _build_rule_layout_payload(req.prompt, req.chat_history, req.selected_options)
+    if not _siliconflow_enabled():
+        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用规则兜底布局）"
+        return fallback
+
+    system = (
+        "你是 AIGC 配置页生成器。请根据用户需求生成“专属编辑布局”。\n"
+        "输出必须是单个 JSON 对象，仅包含字段：text_response(string), layout_config(object)。\n"
+        "layout_config.meta 包含 sourcePrompt, summary, aspect_ratio。\n"
+        "layout_config.sections 为数组，每项包含 id, title, components。\n"
+        "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader。\n"
+        "select/multi-select 需要 options(string[])。\n"
+        "media-uploader 需要 slots，每个 slot 包含 id, label, layerType(background|subject|decor), prompt。\n"
+        "请使用中文，不要包含多余解释或 Markdown。"
+    )
+    selected_json = json.dumps(req.selected_options or {}, ensure_ascii=False)
+    user = (
+        f"用户需求：{req.prompt}\n"
+        f"对话记录：{req.chat_history or ''}\n"
+        f"已选表单项：{selected_json}\n"
+        "请据此生成布局。"
+    )
+    try:
+        content = _call_siliconflow_chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
+        )
+        obj = _safe_parse_json_object(content)
+        return _normalize_layout_payload(obj, fallback, req.prompt, req.selected_options or {})
+    except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as e:
+        fallback["text_response"] += f"（SiliconFlow 调用失败：{e}，使用规则兜底布局）"
+        return fallback
+    except Exception as e:
+        fallback["text_response"] += f"（SiliconFlow 未知错误：{e}，使用规则兜底布局）"
+        return fallback
+
 import uuid
 
 inference_status = {
@@ -84,6 +824,48 @@ inference_status = {
 generated_images = {}
 
 # ... (omitting other parts of the file for brevity)
+
+def _build_placeholder_image(prompt: str, width: int = 512, height: int = 512) -> str:
+    """Generate a lightweight placeholder image (base64) when diffusion is unavailable."""
+    img = Image.new("RGB", (width, height), color=(240, 243, 247))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+    text = (prompt or "LiteDraw").strip()[:80]
+    lines = [text[i:i+20] for i in range(0, len(text), 20)]
+    y = height // 2 - (len(lines) * 12)
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        draw.text(((width - w) / 2, y), line, fill=(60, 60, 70), font=font)
+        y += h + 6
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def _parse_aspect_ratio(ratio_str: str) -> float:
+    try:
+        if ":" in ratio_str:
+            w, h = ratio_str.split(":")
+            return float(w) / float(h)
+        return float(ratio_str)
+    except Exception:
+        return 3 / 4
+
+
+def _create_layer(name: str, layer_type: str, prompt: str, width: int, height: int, x: int, y: int, z_index: int):
+    img_b64 = _build_placeholder_image(f"{layer_type}:{prompt}", width=width, height=height)
+    return {
+        "id": f"{layer_type}-{name}",
+        "name": name,
+        "layer_type": layer_type,
+        "image_base64": img_b64,
+        "width": width,
+        "height": height,
+        "placement": {"x": x, "y": y, "z_index": z_index},
+    }
 
 def run_inference_task(req: GenerateRequest):
     """The actual long-running task for generating an image."""
@@ -399,6 +1181,234 @@ def get_generated_image(image_id: str):
     # del generated_images[image_id]
     
     return StreamingResponse(io.BytesIO(image_data), media_type="image/png")
+
+
+@app.post("/generate-text")
+def generate_text(req: TextRequest):
+    """Lightweight placeholder: echo prompt into positive prompt."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    response = {
+        "text_response": f"收到你的想法：{req.prompt}",
+        "positive": req.prompt.strip(),
+        "negative": "",
+    }
+    return response
+
+
+@app.post("/generate-layout")
+def generate_layout(req: LayoutRequest):
+    """Return a layout configuration for the editor step (LLM or rule-based)."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    return generate_llm_layout(req)
+
+
+@app.post("/remove-background")
+def remove_background(payload: dict):
+    """Placeholder background removal; returns the original image as transparent PNG base64."""
+    image_b64 = payload.get("image_base64")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "缺少 image_base64"})
+    try:
+        if "," in image_b64:
+            image_b64 = image_b64.split(",")[1]
+        image_bytes = base64.b64decode(image_b64)
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        buffer.seek(0)
+        return {"image_base64": base64.b64encode(buffer.getvalue()).decode("utf-8")}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"抠图失败: {e}"})
+
+
+@app.post("/generate-image")
+def generate_image(req: ImageRequest):
+    """Generate an image and return base64 PNG."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    width = max(256, min(req.width or 512, 2048))
+    height = max(256, min(req.height or 512, 2048))
+    # Diffusers requires multiples of 8.
+    width = max(256, (width // 8) * 8)
+    height = max(256, (height // 8) * 8)
+    steps = max(10, min(req.num_inference_steps or 30, 100))
+
+    base_model_id = req.base_model or BASE_MODEL_DEFAULT
+    lora_models = req.lora_models or []
+    lora_models = [name for name in lora_models if name and name != "None"]
+    lora_models = list(dict.fromkeys(lora_models))
+
+    pipe = None
+    try:
+        with _pipe_lock:
+            pipe = _ensure_pipe(base_model_id)
+
+            adapter_names = []
+            supports_multi = hasattr(pipe, "set_adapters")
+            if lora_models:
+                if not supports_multi and len(lora_models) > 1:
+                    raise ValueError("当前 diffusers 版本不支持多个 LoRA 适配器。")
+                for lora_name in lora_models:
+                    lora_path = os.path.join("lora_models", lora_name)
+                    if os.path.isdir(lora_path):
+                        if supports_multi:
+                            adapter_names.append(lora_name)
+                            pipe.load_lora_weights(lora_path, adapter_name=lora_name)
+                        else:
+                            pipe.load_lora_weights(lora_path)
+                    else:
+                        raise FileNotFoundError(f"未找到 LoRA 模型目录：{lora_path}")
+                if supports_multi and adapter_names:
+                    pipe.set_adapters(adapter_names, adapter_weights=[1.0] * len(adapter_names))
+
+        with torch.inference_mode():
+            image = pipe(
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
+                num_inference_steps=steps,
+                guidance_scale=req.guidance_scale or 7.5,
+                width=width,
+                height=height,
+            ).images[0]
+
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format="PNG")
+        image_b64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
+        return {"image_base64": image_b64}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if pipe is not None and lora_models:
+            with _pipe_lock:
+                try:
+                    pipe.unload_lora_weights()
+                except Exception:
+                    pass
+
+
+@app.post("/generate-layered")
+def generate_layered(req: LayeredRequest):
+    """Return placeholder background + subject layers with simple layout metadata."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+
+    ratio = _parse_aspect_ratio(req.aspect_ratio or "3:4")
+    base_w = 768
+    bg_w = base_w
+    bg_h = int(base_w / ratio)
+
+    layers = []
+    # background
+    bg = _create_layer("背景", "background", req.prompt, bg_w, bg_h, x=0, y=0, z_index=0)
+    layers.append(bg)
+
+    subjects = max(1, (req.count or 3) - 1)
+    positions = [
+        (int(bg_w * 0.2), int(bg_h * 0.3)),
+        (int(bg_w * 0.55), int(bg_h * 0.35)),
+        (int(bg_w * 0.35), int(bg_h * 0.65)),
+        (int(bg_w * 0.6), int(bg_h * 0.6)),
+    ]
+    for idx in range(subjects):
+        x, y = positions[idx % len(positions)]
+        layer = _create_layer(f"主体{idx+1}", "subject", req.prompt, 512, 512, x=x, y=y, z_index=idx + 1)
+        layers.append(layer)
+
+    return {
+        "aspect_ratio": req.aspect_ratio,
+        "layers": layers,
+    }
+
+
+@app.post("/compose-materials")
+def compose_materials(payload: dict):
+    """Auto-layout given materials with simple stacking."""
+    materials = payload.get("materials") or []
+    aspect_ratio = payload.get("aspect_ratio") or "3:4"
+    ratio = _parse_aspect_ratio(aspect_ratio)
+    base_w = 768
+    bg_w = base_w
+    bg_h = int(base_w / ratio)
+
+    layout_layers = []
+    positions = [
+        (int(bg_w * 0.2), int(bg_h * 0.25)),
+        (int(bg_w * 0.55), int(bg_h * 0.25)),
+        (int(bg_w * 0.2), int(bg_h * 0.6)),
+        (int(bg_w * 0.55), int(bg_h * 0.6)),
+    ]
+    for idx, mat in enumerate(materials):
+        name = mat.get("name") or f"素材{idx+1}"
+        layer_type = mat.get("layer_type") or "subject"
+        img_b64 = mat.get("image_base64") or _build_placeholder_image(name, 512, 512)
+        x, y = positions[idx % len(positions)]
+        layer = {
+            "id": f"compose-{idx}",
+            "name": name,
+            "layer_type": layer_type,
+            "image_base64": img_b64,
+            "width": 512,
+            "height": 512,
+            "placement": {"x": x, "y": y, "z_index": idx + 1},
+        }
+        layout_layers.append(layer)
+
+    return {
+        "aspect_ratio": aspect_ratio,
+        "layers": layout_layers,
+    }
+
+
+@app.post("/analyze-layer-plan")
+def analyze_layer_plan(payload: dict):
+    """Placeholder for LiteDraw layer plan analysis."""
+    chat_history = payload.get("chat_history") or ""
+    selected = payload.get("selected_options") or {}
+    ui_state = payload.get("ui_state") or {}
+    prompt_hint = (chat_history.splitlines()[-1] if chat_history else "") or "scene"
+    plan = {
+        "estimated_layers": 3,
+        "estimated_time_seconds": 10,
+        "layer_plan": [
+            {
+                "layer_id": "background",
+                "layer_name": "背景",
+                "layer_type": "background",
+                "enabled": True,
+                "order": 0,
+                "prompt": prompt_hint,
+                "placement": {"x": 0.0, "y": 0.0},
+                "generation_params": {"needs_transparent_bg": False},
+            },
+            {
+                "layer_id": "subject-1",
+                "layer_name": "主体 1",
+                "layer_type": "subject",
+                "enabled": True,
+                "order": 1,
+                "prompt": prompt_hint,
+                "placement": {"x": 0.35, "y": 0.45},
+                "generation_params": {"needs_transparent_bg": True},
+            },
+            {
+                "layer_id": "subject-2",
+                "layer_name": "主体 2",
+                "layer_type": "subject",
+                "enabled": True,
+                "order": 2,
+                "prompt": prompt_hint,
+                "placement": {"x": 0.65, "y": 0.55},
+                "generation_params": {"needs_transparent_bg": True},
+            },
+        ],
+        "meta": {
+            "selected_options": selected,
+            "ui_state": ui_state,
+        },
+    }
+    return plan
 
 @app.get("/check-mps")
 def check_mps():

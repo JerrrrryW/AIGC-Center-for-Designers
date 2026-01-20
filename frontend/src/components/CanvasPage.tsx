@@ -158,22 +158,32 @@ const CanvasPage: React.FC = () => {
   );
 
   const addCanvasItem = useCallback(
-    (src: string, name: string, naturalWidth: number, naturalHeight: number) => {
+    (
+      src: string,
+      name: string,
+      naturalWidth: number,
+      naturalHeight: number,
+      preset?: { x?: number; y?: number; width?: number; height?: number; zIndex?: number },
+    ) => {
       if (!naturalWidth || !naturalHeight) {
         return;
       }
 
-      const baseWidth = Math.min(naturalWidth, 320);
+      const baseWidth = preset?.width ?? Math.min(naturalWidth, 320);
       const scale = baseWidth / naturalWidth;
-      const baseHeight = naturalHeight * scale;
+      const baseHeight = preset?.height ?? naturalHeight * scale;
       const canvasCenter = CANVAS_DIMENSION / 2;
+
+      const x = preset?.x ?? canvasCenter - baseWidth / 2;
+      const y = preset?.y ?? canvasCenter - baseHeight / 2;
+      const z = preset?.zIndex;
 
       const itemTemplate: Omit<CanvasItem, 'zIndex'> = {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         src,
         name,
-        x: canvasCenter - baseWidth / 2,
-        y: canvasCenter - baseHeight / 2,
+        x,
+        y,
         width: baseWidth,
         height: baseHeight,
         naturalWidth,
@@ -183,7 +193,7 @@ const CanvasPage: React.FC = () => {
       let nextItem: CanvasItem | null = null;
       setItems((prev) => {
         const maxZ = prev.reduce((acc, item) => Math.max(acc, item.zIndex), 0);
-        nextItem = { ...itemTemplate, zIndex: maxZ + 1 };
+        nextItem = { ...itemTemplate, zIndex: z ?? maxZ + 1 };
         return [...prev, nextItem];
       });
 
@@ -354,7 +364,19 @@ const CanvasPage: React.FC = () => {
             throw new Error('存储的图片尺寸无效。');
           }
           createdUrls.current.add(objectUrl);
-          addCanvasItem(objectUrl, item.name || `生成-${Date.now()}.png`, naturalWidth, naturalHeight);
+          addCanvasItem(
+            objectUrl,
+            item.name || `生成-${Date.now()}.png`,
+            naturalWidth,
+            naturalHeight,
+            {
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+              zIndex: item.zIndex,
+            },
+          );
         } catch (error) {
           console.error('导入已保存的画布素材失败:', error);
         }

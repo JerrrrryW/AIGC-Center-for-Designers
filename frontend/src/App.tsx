@@ -1,10 +1,13 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import TrainingPage from './components/TrainingPage';
 import InferencePage from './components/InferencePage';
 import { ThemeProvider, createTheme } from '@mui/material';
 import CanvasPage from './components/CanvasPage';
+import SceneChatPage from './components/scene/SceneChatPage';
+import SceneEditPage from './components/scene/SceneEditPage';
+import SceneGenerationPage from './components/SceneGenerationPage';
 
 // A simple theme for a professional look
 const theme = createTheme({
@@ -59,6 +62,10 @@ function App() {
             <Route path="/inference" element={<InferencePage />} />
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/canvas" element={<CanvasPage />} />
+            <Route path="/scene" element={<Navigate to="/scene/chat" replace />} />
+            <Route path="/scene/chat" element={<SceneChatPage />} />
+            <Route path="/scene/edit" element={<SceneEditPage />} />
+            <Route path="/scene/quick" element={<SceneGenerationPage />} />
           </Routes>
         </Layout>
       </Router>
