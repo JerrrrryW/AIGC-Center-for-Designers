@@ -5,9 +5,7 @@ import TrainingPage from './components/TrainingPage';
 import InferencePage from './components/InferencePage';
 import { ThemeProvider, createTheme } from '@mui/material';
 import CanvasPage from './components/CanvasPage';
-import SceneChatPage from './components/scene/SceneChatPage';
-import SceneEditPage from './components/scene/SceneEditPage';
-import SceneGenerationPage from './components/SceneGenerationPage';
+import SceneFlowPage from './components/scene/SceneFlowPage';
 
 // A simple theme for a professional look
 const theme = createTheme({
@@ -62,10 +60,10 @@ function App() {
             <Route path="/inference" element={<InferencePage />} />
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/canvas" element={<CanvasPage />} />
-            <Route path="/scene" element={<Navigate to="/scene/chat" replace />} />
-            <Route path="/scene/chat" element={<SceneChatPage />} />
-            <Route path="/scene/edit" element={<SceneEditPage />} />
-            <Route path="/scene/quick" element={<SceneGenerationPage />} />
+            <Route path="/scene" element={<SceneFlowPage />} />
+            <Route path="/scene/chat" element={<Navigate to="/scene" replace />} />
+            <Route path="/scene/edit" element={<Navigate to="/scene" replace />} />
+            <Route path="/scene/quick" element={<Navigate to="/scene" replace />} />
           </Routes>
         </Layout>
       </Router>

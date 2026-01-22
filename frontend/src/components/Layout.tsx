@@ -68,7 +68,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   };
 
   const menuItems = [
-    { text: 'AI 场景生成', path: '/scene/chat', icon: <AutoAwesomeIcon /> },
+    { text: 'AI 场景生成', path: '/scene', icon: <AutoAwesomeIcon /> },
     { text: 'LoRA 训练', path: '/', icon: <ModelTrainingIcon /> },
     { text: '推理生成', path: '/inference', icon: <ImagesearchRollerIcon /> },
     { text: '训练模型', path: '/models', icon: <StorageIcon /> },
