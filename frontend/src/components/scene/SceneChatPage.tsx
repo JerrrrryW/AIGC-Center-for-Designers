@@ -196,6 +196,7 @@ const SceneChatPage: React.FC = () => {
                       >
                         <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
                           {msg.text}
+                          {msg.typing ? <LoadingDots /> : null}
                         </Typography>
                         {!msg.typing && msg.form?.length ? (
                           <Box sx={{ mt: 1 }}>
@@ -279,12 +280,12 @@ const SceneChatPage: React.FC = () => {
           <Card sx={{ height: '100%' }}>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                平板模式参考
+                意图与提示
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              {/* <Typography variant="body2" color="text.secondary">
                 LiteDraw 在平板横屏下会把“聊天”和“表单/预览”分栏。这里保留右侧面板作为辅助信息；
                 表单本身会作为卡片出现在对话中，支持多轮对话持续更新。
-              </Typography>
+              </Typography> */}
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" gutterBottom>
                   当前选择
@@ -318,6 +319,43 @@ const SceneChatPage: React.FC = () => {
 };
 
 export default SceneChatPage;
+
+const LoadingDots: React.FC = () => {
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 0.6,
+        ml: 1,
+        verticalAlign: 'middle',
+        '@keyframes chatDotsPulse': {
+          '0%, 80%, 100%': { opacity: 0.3, transform: 'translateY(0)' },
+          '40%': { opacity: 1, transform: 'translateY(-2px)' },
+        },
+        '& span': {
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          backgroundColor: 'currentColor',
+          display: 'inline-block',
+          animation: 'chatDotsPulse 1.2s infinite ease-in-out',
+        },
+        '& span:nth-of-type(2)': {
+          animationDelay: '0.2s',
+        },
+        '& span:nth-of-type(3)': {
+          animationDelay: '0.4s',
+        },
+      }}
+    >
+      <Box component="span" />
+      <Box component="span" />
+      <Box component="span" />
+    </Box>
+  );
+};
 
 function normalizeForm(input: unknown): FormSection[] {
   if (!Array.isArray(input)) {

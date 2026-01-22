@@ -31,6 +31,9 @@ type LayoutConfig = {
 type LayoutSection = {
   id: string;
   title?: string;
+  layout?: {
+    span?: number;
+  };
   components?: LayoutComponent[];
 };
 
@@ -162,36 +165,65 @@ const DynamicRenderer: React.FC<DynamicRendererProps> = ({
   disabled,
 }) => {
   const sections = config.sections ?? [];
+  const layoutMeta = (config.meta ?? {}).layout ?? {};
+  const columns = coerceNumber(layoutMeta.columns);
+  const minCardWidth = coerceNumber(layoutMeta.minCardWidth) ?? 360;
+  const gapValue = coerceNumber(layoutMeta.gap) ?? 3;
+  const dense = typeof layoutMeta.dense === 'boolean' ? layoutMeta.dense : true;
+  const gridTemplateColumns =
+    columns && columns > 0
+      ? { xs: '1fr', lg: `repeat(${Math.max(1, Math.floor(columns))}, minmax(0, 1fr))` }
+      : { xs: '1fr', lg: `repeat(auto-fit, minmax(${Math.max(240, Math.floor(minCardWidth))}px, 1fr))` };
 
   return (
-    <Stack spacing={3}>
-      {sections.map((section) => (
-        <Card key={section.id} variant="outlined">
-          <CardContent>
-            {section.title ? (
-              <Typography variant="h6" gutterBottom>
-                {section.title}
-              </Typography>
-            ) : null}
-            <Stack spacing={2}>
-              {(section.components ?? []).map((component) => (
-                <Box key={component.id}>
-                  <ComponentRenderer
-                    component={component}
-                    value={state[component.id]}
-                    onChange={(value) => onStateChange(component.id, value)}
-                    onSlotUpload={(slotId, file) => onSlotUpload(component.id, slotId, file)}
-                    onSlotGenerate={(slot) => onSlotGenerate(component.id, slot)}
-                    onSlotRemoveBackground={(slot) => onSlotRemoveBackground(component.id, slot)}
-                    disabled={disabled}
-                  />
-                </Box>
-              ))}
-            </Stack>
-          </CardContent>
-        </Card>
-      ))}
-    </Stack>
+    <Box
+      sx={{
+        display: 'grid',
+        gridTemplateColumns,
+        gap: gapValue,
+        gridAutoFlow: dense ? 'dense' : 'row',
+        alignItems: 'start',
+      }}
+    >
+      {sections.map((section) => {
+        const span = coerceNumber(section.layout?.span);
+        const columnSpan = span && span > 0 ? Math.floor(span) : undefined;
+        const gridColumn = columnSpan ? { xs: 'auto', lg: `span ${columnSpan}` } : 'auto';
+        return (
+          <Card
+            key={section.id}
+            variant="outlined"
+            sx={{
+              gridColumn,
+              minWidth: 0,
+            }}
+          >
+            <CardContent>
+              {section.title ? (
+                <Typography variant="h6" gutterBottom>
+                  {section.title}
+                </Typography>
+              ) : null}
+              <Stack spacing={2}>
+                {(section.components ?? []).map((component) => (
+                  <Box key={component.id}>
+                    <ComponentRenderer
+                      component={component}
+                      value={state[component.id]}
+                      onChange={(value) => onStateChange(component.id, value)}
+                      onSlotUpload={(slotId, file) => onSlotUpload(component.id, slotId, file)}
+                      onSlotGenerate={(slot) => onSlotGenerate(component.id, slot)}
+                      onSlotRemoveBackground={(slot) => onSlotRemoveBackground(component.id, slot)}
+                      disabled={disabled}
+                    />
+                  </Box>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        );
+      })}
+    </Box>
   );
 };
 

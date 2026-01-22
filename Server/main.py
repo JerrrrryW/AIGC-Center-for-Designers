@@ -41,7 +41,16 @@ caption_status = {
 
 BASE_MODEL_DEFAULT = "runwayml/stable-diffusion-v1-5"
 DISABLE_SAFETY_CHECKER = True
-LAYOUT_SCHEMA_VERSION = "1.1"
+LAYOUT_SCHEMA_VERSION = "1.2"
+llm_runtime_config = {
+    "api_key": None,
+    "base_url": None,
+    "model": None,
+    "temperature": None,
+    "image_api_key": None,
+    "image_base_url": None,
+    "image_model": None,
+}
 IMAGE_PROVIDER_ENV = "IMAGE_GENERATION_PROVIDER"
 _pipe_cache = {
     "base_model": None,
@@ -120,6 +129,16 @@ class TextRequest(BaseModel):
     prompt: str
 
 
+class LlmConfigRequest(BaseModel):
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    image_api_key: Optional[str] = None
+    image_base_url: Optional[str] = None
+    image_model: Optional[str] = None
+
+
 class ImageRequest(BaseModel):
     prompt: str
     negative_prompt: Optional[str] = None
@@ -181,8 +200,118 @@ def chat(req: ChatRequest):
     return {"json_object": result}
 
 
+@app.get("/llm-config")
+def get_llm_config():
+    config = _resolve_llm_config()
+    image_config = _resolve_image_config()
+    return {
+        "api_key_set": bool(config.get("api_key")),
+        "base_url": config.get("base_url"),
+        "model": config.get("model"),
+        "temperature": config.get("temperature"),
+        "image_api_key_set": bool(image_config.get("api_key")),
+        "image_base_url": image_config.get("base_url"),
+        "image_model": image_config.get("model"),
+    }
+
+
+@app.post("/llm-config")
+def set_llm_config(req: LlmConfigRequest):
+    if req.api_key is not None:
+        api_key = req.api_key.strip()
+        llm_runtime_config["api_key"] = api_key or None
+    if req.base_url is not None:
+        base_url = req.base_url.strip()
+        llm_runtime_config["base_url"] = base_url or None
+    if req.model is not None:
+        model = req.model.strip()
+        llm_runtime_config["model"] = model or None
+    if req.temperature is not None:
+        llm_runtime_config["temperature"] = float(req.temperature)
+    if req.image_api_key is not None:
+        image_api_key = req.image_api_key.strip()
+        llm_runtime_config["image_api_key"] = image_api_key or None
+    if req.image_base_url is not None:
+        image_base_url = req.image_base_url.strip()
+        llm_runtime_config["image_base_url"] = image_base_url or None
+    if req.image_model is not None:
+        image_model = req.image_model.strip()
+        llm_runtime_config["image_model"] = image_model or None
+    config = _resolve_llm_config()
+    image_config = _resolve_image_config()
+    return {
+        "status": "ok",
+        "api_key_set": bool(config.get("api_key")),
+        "base_url": config.get("base_url"),
+        "model": config.get("model"),
+        "temperature": config.get("temperature"),
+        "image_api_key_set": bool(image_config.get("api_key")),
+        "image_base_url": image_config.get("base_url"),
+        "image_model": image_config.get("model"),
+    }
+
+
+def _resolve_llm_temperature() -> float:
+    override = llm_runtime_config.get("temperature")
+    if isinstance(override, (int, float)):
+        return float(override)
+    env_temp = os.getenv("SILICONFLOW_TEMPERATURE", "").strip()
+    if env_temp:
+        try:
+            return float(env_temp)
+        except ValueError:
+            pass
+    return 0.4
+
+
+def _resolve_llm_config() -> dict:
+    api_key = (llm_runtime_config.get("api_key") or "").strip()
+    if not api_key:
+        api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    base_url = (llm_runtime_config.get("base_url") or "").strip()
+    if not base_url:
+        base_url = os.getenv("SILICONFLOW_BASE_URL", "").strip()
+    base_url = base_url or "https://api.siliconflow.cn/v1/chat/completions"
+    model = (llm_runtime_config.get("model") or "").strip()
+    if not model:
+        model = os.getenv("SILICONFLOW_MODEL", "").strip()
+    model = model or "Qwen/Qwen2.5-7B-Instruct"
+    temperature = _resolve_llm_temperature()
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "temperature": temperature,
+    }
+
+
 def _siliconflow_enabled() -> bool:
-    return bool(os.getenv("SILICONFLOW_API_KEY", "").strip())
+    return bool(_resolve_llm_config().get("api_key"))
+
+
+def _resolve_image_config() -> dict:
+    api_key = (llm_runtime_config.get("image_api_key") or "").strip()
+    if not api_key:
+        api_key = (llm_runtime_config.get("api_key") or "").strip()
+    if not api_key:
+        api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    base_url = (llm_runtime_config.get("image_base_url") or "").strip()
+    if not base_url:
+        base_url = os.getenv("SILICONFLOW_IMAGE_BASE_URL", "").strip()
+    base_url = base_url or "https://api.siliconflow.cn/v1"
+    model = (llm_runtime_config.get("image_model") or "").strip()
+    if not model:
+        model = os.getenv("SILICONFLOW_IMAGE_MODEL", "").strip()
+    model = model or "Qwen/Qwen-Image"
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+    }
+
+
+def _siliconflow_image_enabled() -> bool:
+    return bool(_resolve_image_config().get("api_key"))
 
 
 def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
@@ -193,16 +322,18 @@ def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> s
       - SILICONFLOW_BASE_URL (optional, default OpenAI-compatible endpoint)
       - SILICONFLOW_MODEL (optional)
     """
-    api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    config = _resolve_llm_config()
+    api_key = (config.get("api_key") or "").strip()
     if not api_key:
         raise RuntimeError("SILICONFLOW_API_KEY 未设置")
-    base_url = os.getenv("SILICONFLOW_BASE_URL", "").strip() or "https://api.siliconflow.cn/v1/chat/completions"
-    model = os.getenv("SILICONFLOW_MODEL", "").strip() or "Qwen/Qwen2.5-7B-Instruct"
+    base_url = config.get("base_url")
+    model = config.get("model")
+    temperature = config.get("temperature", 0.4)
 
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": 0.4,
+        "temperature": temperature,
         "response_format": {"type": "json_object"},
     }
     data = json.dumps(payload).encode("utf-8")
@@ -229,12 +360,12 @@ def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> s
 def _resolve_image_provider(requested: Optional[str]) -> str:
     provider = (requested or os.getenv(IMAGE_PROVIDER_ENV, "")).strip().lower()
     if not provider:
-        provider = "siliconflow" if _siliconflow_enabled() else "local"
+        provider = "siliconflow" if _siliconflow_image_enabled() else "local"
     if provider == "auto":
-        return "siliconflow" if _siliconflow_enabled() else "local"
+        return "siliconflow" if _siliconflow_image_enabled() else "local"
     if provider not in {"siliconflow", "local"}:
         raise RuntimeError(f"不支持的生图链路：{provider}")
-    if provider == "siliconflow" and not _siliconflow_enabled():
+    if provider == "siliconflow" and not _siliconflow_image_enabled():
         raise RuntimeError("SILICONFLOW_API_KEY 未设置")
     return provider
 
@@ -247,12 +378,12 @@ def _call_siliconflow_image(prompt: str, width: int, height: int, steps: int, ti
       - SILICONFLOW_IMAGE_BASE_URL (optional, default https://api.siliconflow.cn/v1)
       - SILICONFLOW_IMAGE_MODEL (optional, default Qwen/Qwen-Image)
     """
-    api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    config = _resolve_image_config()
+    api_key = config.get("api_key", "").strip()
     if not api_key:
         raise RuntimeError("SILICONFLOW_API_KEY 未设置")
-    base_url = os.getenv("SILICONFLOW_IMAGE_BASE_URL", "").strip() or "https://api.siliconflow.cn/v1"
-    base_url = base_url.rstrip("/")
-    model = os.getenv("SILICONFLOW_IMAGE_MODEL", "").strip() or "Qwen/Qwen-Image"
+    base_url = (config.get("base_url") or "").rstrip("/")
+    model = config.get("model")
 
     payload = {
         "model": model,
@@ -688,6 +819,12 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             "aspect_ratio": aspect_ratio,
             "aspect_ratio_field": "scene-aspect",
             "schema_version": LAYOUT_SCHEMA_VERSION,
+            "layout": {
+                "columns": 2,
+                "minCardWidth": 360,
+                "gap": 3,
+                "dense": True,
+            },
         },
         "sections": [
             {
@@ -734,6 +871,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             {
                 "id": "prompt",
                 "title": "提示词",
+                "layout": {"span": 2},
                 "components": [
                     {
                         "id": "prompt-editor",
@@ -805,6 +943,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             {
                 "id": "materials",
                 "title": "素材准备",
+                "layout": {"span": 2},
                 "components": [
                     {
                         "id": "materials-uploader",
@@ -925,6 +1064,114 @@ def _sanitize_prompt_fields(raw_fields, base_prompt: str) -> List[dict]:
             },
         ]
     return fields
+
+
+def _normalize_layout_meta(raw_layout) -> dict:
+    if not isinstance(raw_layout, dict):
+        return {}
+    layout = {}
+    columns = _coerce_number(raw_layout.get("columns") or raw_layout.get("cols"))
+    if columns is not None and columns > 0:
+        layout["columns"] = int(max(1, columns))
+    min_card = _coerce_number(raw_layout.get("minCardWidth") or raw_layout.get("min_card_width"))
+    if min_card is not None and min_card > 0:
+        layout["minCardWidth"] = int(max(240, min_card))
+    gap = _coerce_number(raw_layout.get("gap") or raw_layout.get("gridGap"))
+    if gap is not None and gap > 0:
+        layout["gap"] = int(max(1, gap))
+    dense = raw_layout.get("dense")
+    if dense is not None:
+        layout["dense"] = _coerce_bool(dense, default=True)
+    return layout
+
+
+def _normalize_section_layout(raw_layout) -> Optional[dict]:
+    if not isinstance(raw_layout, dict):
+        return None
+    span = _coerce_number(raw_layout.get("span") or raw_layout.get("colSpan"))
+    if span is None or span <= 0:
+        return None
+    return {"span": int(max(1, span))}
+
+
+def _extract_media_slots(layout_config: dict) -> List[dict]:
+    if not isinstance(layout_config, dict):
+        return []
+    sections = layout_config.get("sections")
+    if not isinstance(sections, list):
+        return []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        components = section.get("components")
+        if not isinstance(components, list):
+            continue
+        for comp in components:
+            if isinstance(comp, dict) and comp.get("type") == "media-uploader":
+                slots = comp.get("slots")
+                if isinstance(slots, list) and slots:
+                    return slots
+    return []
+
+
+def _normalize_slots_payload(obj, base_prompt: str, selected_options: dict, fallback_slots: List[dict]) -> List[dict]:
+    raw_slots = None
+    if isinstance(obj, dict):
+        raw_slots = obj.get("slots")
+        if raw_slots is None:
+            raw_slots = obj.get("media_slots")
+    selected_style = _pick_selected_first(selected_options, ["风格", "风格方向"])
+    style_default = selected_style or _infer_style(base_prompt)
+    selected_moods = _pick_selected_list(selected_options, ["氛围", "情绪氛围", "情绪", "氛围关键词"])
+    mood_defaults = selected_moods or _infer_moods(base_prompt)
+
+    slots = []
+    if isinstance(raw_slots, list) and raw_slots:
+        slots = _sanitize_slots(raw_slots, base_prompt, style_default, mood_defaults)
+    if not slots and fallback_slots:
+        slots = _sanitize_slots(fallback_slots, base_prompt, style_default, mood_defaults)
+    return slots
+
+
+def _apply_slots_to_layout(layout_config: dict, slots: List[dict]) -> dict:
+    if not isinstance(layout_config, dict):
+        return layout_config
+    if not slots:
+        return layout_config
+    layout_copy = json.loads(json.dumps(layout_config))
+    sections = layout_copy.get("sections")
+    if not isinstance(sections, list):
+        return layout_copy
+    applied = False
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        components = section.get("components")
+        if not isinstance(components, list):
+            continue
+        for comp in components:
+            if isinstance(comp, dict) and comp.get("type") == "media-uploader":
+                comp["slots"] = slots
+                applied = True
+    if not applied:
+        sections.append(
+            {
+                "id": "materials",
+                "title": "素材准备",
+                "layout": {"span": 2},
+                "components": [
+                    {
+                        "id": "materials-uploader",
+                        "type": "media-uploader",
+                        "title": "上传或生成素材",
+                        "required": True,
+                        "max": max(1, len(slots)),
+                        "slots": slots,
+                    }
+                ],
+            }
+        )
+    return layout_copy
 
 
 def _sanitize_slots(raw_slots, base_prompt: str, style: str, moods: List[str]) -> List[dict]:
@@ -1109,6 +1356,9 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
         entry = {"id": str(section_id), "components": components}
         if title:
             entry["title"] = title
+        section_layout = _normalize_section_layout(section.get("layout"))
+        if section_layout:
+            entry["layout"] = section_layout
         sanitized_sections.append(entry)
 
     if not sanitized_sections or not has_media:
@@ -1129,6 +1379,12 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
         meta["aspect_ratio_field"] = ratio_component_ids[0]
     else:
         meta.pop("aspect_ratio_field", None)
+    layout_meta = _normalize_layout_meta(meta.get("layout"))
+    if not layout_meta:
+        fallback_layout = fallback.get("layout_config", {}).get("meta", {}).get("layout")
+        layout_meta = _normalize_layout_meta(fallback_layout)
+    if layout_meta:
+        meta["layout"] = layout_meta
     return {"text_response": text.strip(), "layout_config": {"meta": meta, "sections": sanitized_sections}}
 
 
@@ -1138,19 +1394,27 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用规则兜底布局）"
         return fallback
 
-    system = (
+    layout_system = (
         "你是 AIGC 配置页生成器。请根据用户需求生成“专属编辑布局”。\n"
         "输出必须是单个 JSON 对象，仅包含字段：text_response(string), layout_config(object)。\n"
-        f"layout_config.meta 包含 sourcePrompt, summary, aspect_ratio, schema_version(固定为 {LAYOUT_SCHEMA_VERSION})，可选 aspect_ratio_field。\n"
-        "layout_config.sections 为数组，每项包含 id, title, components。\n"
+        f"layout_config.meta 包含 sourcePrompt, summary, aspect_ratio, schema_version(固定为 {LAYOUT_SCHEMA_VERSION})，可选 aspect_ratio_field 与 layout。\n"
+        "meta.layout 可包含 columns/minCardWidth/gap/dense。\n"
+        "layout_config.sections 为数组，每项包含 id, title, components，可选 layout(span)。\n"
         "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader, number-input, slider, toggle, ratio-select, color-palette, prompt-editor。\n"
         "select/multi-select/ratio-select 需要 options(string[])。\n"
         "number-input/slider 可包含 min/max/step/default/unit/helperText。\n"
         "toggle 可包含 default(boolean)/helperText。\n"
         "color-palette 需要 options，支持 string 或 {value,label,color}。\n"
         "prompt-editor 需要 fields，fields 为 {id,label,placeholder,default,helperText}。\n"
-        "media-uploader 需要 slots，每个 slot 包含 id, label, layerType(background|subject|decor), prompt。\n"
+        "media-uploader 组件可以先不填 slots 或仅给出占位，slots 会在第二步生成。\n"
         "请使用中文，不要包含多余解释或 Markdown。"
+    )
+    slots_system = (
+        "你是 AIGC 图层规划器。请根据用户需求返回生图图层拆分。\n"
+        "输出必须是单个 JSON 对象，仅包含字段：slots(array)。\n"
+        "slots 中每一项为 {id,label,layerType,prompt}，layerType 只能是 background/subject/decor。\n"
+        "必须包含一个 background，至少一个 subject；可根据需求补充 decor。\n"
+        "prompt 需简洁描述该层要生成的内容。请使用中文。"
     )
     selected_json = json.dumps(req.selected_options or {}, ensure_ascii=False)
     user = (
@@ -1160,20 +1424,50 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         "请据此生成布局。"
     )
     try:
-        content = _call_siliconflow_chat(
+        layout_content = _call_siliconflow_chat(
             [
-                {"role": "system", "content": system},
+                {"role": "system", "content": layout_system},
                 {"role": "user", "content": user},
             ]
         )
-        obj = _safe_parse_json_object(content)
-        return _normalize_layout_payload(obj, fallback, req.prompt, req.selected_options or {})
+        layout_obj = _safe_parse_json_object(layout_content)
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as e:
-        fallback["text_response"] += f"（SiliconFlow 调用失败：{e}，使用规则兜底布局）"
-        return fallback
+        layout_obj = None
+        fallback["text_response"] += f"（布局生成失败：{e}，使用规则兜底布局）"
     except Exception as e:
-        fallback["text_response"] += f"（SiliconFlow 未知错误：{e}，使用规则兜底布局）"
-        return fallback
+        layout_obj = None
+        fallback["text_response"] += f"（布局生成未知错误：{e}，使用规则兜底布局）"
+
+    try:
+        slots_content = _call_siliconflow_chat(
+            [
+                {"role": "system", "content": slots_system},
+                {"role": "user", "content": user},
+            ]
+        )
+        slots_obj = _safe_parse_json_object(slots_content)
+    except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as e:
+        slots_obj = None
+        fallback["text_response"] += f"（图层拆分失败：{e}，使用规则兜底图层）"
+    except Exception as e:
+        slots_obj = None
+        fallback["text_response"] += f"（图层拆分未知错误：{e}，使用规则兜底图层）"
+
+    layout_config = None
+    text_response = None
+    if isinstance(layout_obj, dict):
+        text_response = layout_obj.get("text_response")
+        layout_config = layout_obj.get("layout_config")
+    if not isinstance(text_response, str) or not text_response.strip():
+        text_response = fallback.get("text_response", "")
+    if not isinstance(layout_config, dict):
+        layout_config = fallback.get("layout_config", {})
+
+    fallback_slots = _extract_media_slots(fallback.get("layout_config", {}))
+    slots = _normalize_slots_payload(slots_obj, req.prompt, req.selected_options or {}, fallback_slots)
+    layout_with_slots = _apply_slots_to_layout(layout_config, slots)
+    combined = {"text_response": text_response, "layout_config": layout_with_slots}
+    return _normalize_layout_payload(combined, fallback, req.prompt, req.selected_options or {})
 
 import uuid
 
