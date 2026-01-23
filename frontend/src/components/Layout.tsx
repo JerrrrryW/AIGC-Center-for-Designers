@@ -287,7 +287,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <Toolbar />
         <Box
           sx={{
-            maxWidth: isCanvasRoute ? '100%' : '1280px',
+            maxWidth: isCanvasRoute ? '100%' : '1920px',
             margin: isCanvasRoute ? 0 : '0 auto',
             height: isCanvasRoute ? '100%' : 'auto',
           }}

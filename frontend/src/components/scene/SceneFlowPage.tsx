@@ -7,22 +7,26 @@ import {
   CardContent,
   Chip,
   Container,
-  Divider,
   IconButton,
   LinearProgress,
   Paper,
   Stack,
   Step,
-  StepButton,
+  StepLabel,
   Stepper,
   TextField,
   Typography,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import axios from 'axios';
+import { Responsive, WidthProvider, type Layout, type Layouts } from 'react-grid-layout';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
-import DynamicRenderer, { type MediaSlot } from './dynamic/DynamicRenderer';
+import { SectionCard, type LayoutConfig, type LayoutSection, type MediaSlot } from './dynamic/DynamicRenderer';
+
+const ResponsiveGridLayout = WidthProvider(Responsive);
 
 type ChatMessage = { role: 'user' | 'bot'; text: string; form?: FormSection[]; typing?: boolean };
 type FormSection = { title: string; options: string[] };
@@ -34,29 +38,6 @@ type LayoutPayload = {
   textResponse?: string;
 };
 
-type LayoutComponent = {
-  id: string;
-  type: string;
-  default?: any;
-  slots?: MediaSlot[];
-  options?: any;
-  fields?: any;
-  min?: number;
-  max?: number;
-  step?: number;
-  allowMultiple?: boolean;
-};
-
-type LayoutSection = {
-  id: string;
-  components?: LayoutComponent[];
-};
-
-type LayoutConfig = {
-  meta?: Record<string, any>;
-  sections?: LayoutSection[];
-};
-
 type StatusState = {
   type: 'idle' | 'loading' | 'success' | 'error';
   message: string;
@@ -65,20 +46,16 @@ type StatusState = {
 const CANVAS_DIMENSION = 4000;
 const TARGET_BG_WIDTH = 2400;
 const FLOW_STEPS = ['对话澄清', '编辑与素材', '预览入画布'];
-type ActiveCard = 'chat' | 'edit' | 'preview' | 'quick';
-const CARD_ORDER: ActiveCard[] = ['chat', 'edit', 'preview', 'quick'];
-const CARD_SPACING = 'clamp(220px, 28vw, 460px)';
-const CARD_SIZES: Record<ActiveCard, { width: string; height: string }> = {
-  chat: { width: 'min(92vw, 720px)', height: 'min(68vh, 600px)' },
-  edit: { width: 'min(94vw, 820px)', height: 'min(72vh, 660px)' },
-  preview: { width: 'min(90vw, 640px)', height: 'min(64vh, 560px)' },
-  quick: { width: 'min(86vw, 520px)', height: 'min(58vh, 480px)' },
-};
+const DASHBOARD_MIN_CARD = 280;
+const GRID_BREAKPOINTS = { lg: 1200, md: 900, sm: 600, xs: 0 };
+const GRID_COLS = { lg: 12, md: 8, sm: 6, xs: 4 };
+const GRID_ROW_HEIGHT = 32;
+const GRID_MARGIN: [number, number] = [16, 16];
 
 const SceneFlowPage: React.FC = () => {
   const navigate = useNavigate();
-  const [activeCard, setActiveCard] = useState<ActiveCard>('chat');
   const [status, setStatus] = useState<StatusState>({ type: 'idle', message: '' });
+  const [showQuick, setShowQuick] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'bot', text: '你好！告诉我你想生成什么场景，我会先用选择题帮你把需求变清晰。' },
@@ -90,7 +67,6 @@ const SceneFlowPage: React.FC = () => {
 
   const [layoutConfig, setLayoutConfig] = useState<LayoutConfig | undefined>(undefined);
   const [generatedPrompt, setGeneratedPrompt] = useState('');
-  const [chatHistorySnapshot, setChatHistorySnapshot] = useState('');
   const [isWorking, setIsWorking] = useState(false);
   const [uiState, setUiState] = useState<Record<string, any>>({});
   const [previewItems, setPreviewItems] = useState<any[]>([]);
@@ -112,6 +88,7 @@ const SceneFlowPage: React.FC = () => {
     if (!latestForm?.length) return true;
     return latestForm.every((section) => (selectedOptions[section.title] ?? []).length > 0);
   }, [latestForm, selectedOptions]);
+  const hasForm = Boolean(latestForm?.length);
 
   const chatHistory = useMemo(() => {
     return messages
@@ -132,8 +109,7 @@ const SceneFlowPage: React.FC = () => {
     () => extractMediaSlots(layoutConfig, uiState),
     [layoutConfig, uiState],
   );
-  const activeCardIndex = useMemo(() => CARD_ORDER.indexOf(activeCard), [activeCard]);
-  const activeStep = activeCard === 'edit' ? 1 : activeCard === 'preview' ? 2 : 0;
+  const activeStep = previewItems.length ? 2 : layoutConfig ? 1 : 0;
 
   useEffect(() => {
     if (!layoutConfig) return;
@@ -160,20 +136,6 @@ const SceneFlowPage: React.FC = () => {
       return { ...prev, [title]: next };
     });
   }, []);
-
-  const goToChat = useCallback(() => {
-    setActiveCard('chat');
-    setStatus({ type: 'idle', message: '' });
-  }, []);
-
-  const goToEdit = useCallback(() => {
-    if (!layoutConfig) {
-      setStatus({ type: 'error', message: '请先生成编辑界面。' });
-      setActiveCard('chat');
-      return;
-    }
-    setActiveCard('edit');
-  }, [layoutConfig]);
 
   const handleSend = useCallback(async () => {
     const value = input.trim();
@@ -242,10 +204,8 @@ const SceneFlowPage: React.FC = () => {
       const nextLayout = layoutPayload.layout_config ?? layoutPayload.layoutConfig;
       setLayoutConfig(nextLayout);
       setGeneratedPrompt(layoutPayload.text_response ?? layoutPayload.textResponse ?? '');
-      setChatHistorySnapshot(chatHistory);
       setUiState(initializeUiState(nextLayout));
       setStatus({ type: 'success', message: '编辑界面已就绪，开始准备素材吧。' });
-      setActiveCard('edit');
     } catch (error) {
       let message = '生成编辑界面失败。';
       if (axios.isAxiosError(error) && error.response) {
@@ -469,7 +429,6 @@ const SceneFlowPage: React.FC = () => {
       sessionStorage.setItem('pendingCanvasItems', JSON.stringify(pendingItems));
       setPreviewItems(pendingItems);
       setStatus({ type: 'success', message: '预览完成，可进入画布。' });
-      setActiveCard('preview');
     } catch (error) {
       const msg = toApiErrorMessage(error, '生成预览失败。');
       setStatus({ type: 'error', message: msg });
@@ -533,51 +492,58 @@ const SceneFlowPage: React.FC = () => {
     return { bgSlot, subjects };
   }, [mediaSlots]);
 
+  const layoutMeta = useMemo(() => (layoutConfig?.meta ?? {}).layout ?? {}, [layoutConfig]);
+  const layoutColumns = Math.max(1, Math.floor(coerceNumber(layoutMeta.columns) ?? 5));
+  const layouts = useMemo<Layouts>(() => {
+    const sections = layoutConfig?.sections ?? [];
+    const spanToWidth = (cols: number, span: number) => {
+      const colUnit = Math.max(1, Math.floor(cols / layoutColumns));
+      return Math.min(cols, Math.max(1, span * colUnit));
+    };
+    const buildForCols = (cols: number) => {
+      const items: LayoutItemSpec[] = [];
+      const majorSpan = Math.min(2, layoutColumns);
+      items.push({ i: 'chat', w: spanToWidth(cols, majorSpan), h: 12 });
+      items.push({ i: 'form', w: spanToWidth(cols, 1), h: 7 });
+      if (layoutConfig) {
+        items.push({ i: 'summary', w: spanToWidth(cols, majorSpan), h: 4 });
+        sections.forEach((section) => {
+          const span = Math.max(1, Math.floor(coerceNumber(section.layout?.span) ?? 1));
+          items.push({
+            i: `section-${section.id}`,
+            w: spanToWidth(cols, Math.min(span, layoutColumns)),
+            h: estimateSectionHeight(section),
+          });
+        });
+        items.push({ i: 'preview', w: spanToWidth(cols, majorSpan), h: 10 });
+      }
+      if (showQuick) {
+        items.push({ i: 'quick', w: spanToWidth(cols, 1), h: 7 });
+      }
+      return packGridItems(items, cols);
+    };
+    return {
+      lg: buildForCols(GRID_COLS.lg),
+      md: buildForCols(GRID_COLS.md),
+      sm: buildForCols(GRID_COLS.sm),
+      xs: buildForCols(GRID_COLS.xs),
+    };
+  }, [layoutColumns, layoutConfig, showQuick]);
+
   const actionDisabled = isSending || isWorking;
   const actionBar = useMemo(() => {
-    if (activeCard === 'edit') {
+    if (!layoutConfig) {
       return (
         <Stack direction="row" spacing={1} alignItems="center">
-          <Button variant="outlined" onClick={goToChat} disabled={actionDisabled}>
-            返回聊天
-          </Button>
           <Button
             variant="contained"
-            onClick={handleGeneratePreviewToCanvas}
-            disabled={actionDisabled || !layoutConfig}
+            onClick={handleGenerateEdit}
+            disabled={isSending || !isFormComplete}
           >
-            生成预览
+            生成编辑界面
           </Button>
-          <Button variant="text" onClick={() => setActiveCard('quick')} disabled={actionDisabled}>
-            快速模式
-          </Button>
-        </Stack>
-      );
-    }
-    if (activeCard === 'preview') {
-      return (
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Button variant="outlined" onClick={goToEdit} disabled={actionDisabled}>
-            返回编辑
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleGoCanvas}
-            disabled={actionDisabled || !previewItems.length}
-          >
-            进入画布
-          </Button>
-        </Stack>
-      );
-    }
-    if (activeCard === 'quick') {
-      return (
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Button variant="outlined" onClick={() => setActiveCard('chat')}>
-            回到流程
-          </Button>
-          <Button variant="contained" onClick={handleQuickGenerate} disabled={quickLoading}>
-            快速生成
+          <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={isSending}>
+            {showQuick ? '隐藏快速模式' : '快速模式'}
           </Button>
         </Stack>
       );
@@ -586,51 +552,34 @@ const SceneFlowPage: React.FC = () => {
       <Stack direction="row" spacing={1} alignItems="center">
         <Button
           variant="contained"
-          onClick={handleGenerateEdit}
-          disabled={isSending || !isFormComplete}
+          onClick={handleGeneratePreviewToCanvas}
+          disabled={actionDisabled}
         >
-          生成编辑界面
+          生成预览
         </Button>
-        <Button variant="text" onClick={() => setActiveCard('quick')} disabled={isSending}>
-          快速模式
+        <Button
+          variant="outlined"
+          onClick={handleGoCanvas}
+          disabled={actionDisabled || !previewItems.length}
+        >
+          进入画布
+        </Button>
+        <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={actionDisabled}>
+          {showQuick ? '隐藏快速模式' : '快速模式'}
         </Button>
       </Stack>
     );
   }, [
     actionDisabled,
-    activeCard,
-    goToChat,
-    goToEdit,
     handleGenerateEdit,
     handleGeneratePreviewToCanvas,
     handleGoCanvas,
-    handleQuickGenerate,
     isFormComplete,
     isSending,
     layoutConfig,
     previewItems.length,
-    quickLoading,
+    showQuick,
   ]);
-
-  const cardStyleFor = useCallback(
-    (index: number) => {
-      const offset = index - activeCardIndex;
-      const translateX = `calc(${offset} * ${CARD_SPACING})`;
-      const isActive = offset === 0;
-      const isHidden = Math.abs(offset) >= 2;
-      return {
-        position: 'absolute' as const,
-        top: '50%',
-        left: '50%',
-        transform: `translate(-50%, -50%) translateX(${translateX}) scale(${isActive ? 1 : 0.92})`,
-        opacity: isHidden ? 0 : isActive ? 1 : 0.35,
-        pointerEvents: isActive ? 'auto' : 'none',
-        transition: 'transform 420ms ease, opacity 320ms ease',
-        zIndex: 20 - Math.abs(offset),
-      };
-    },
-    [activeCardIndex],
-  );
 
   return (
     <Container
@@ -652,436 +601,385 @@ const SceneFlowPage: React.FC = () => {
       </Typography>
 
       <Stepper activeStep={activeStep} sx={{ mb: 1 }}>
-        {FLOW_STEPS.map((label, index) => (
+        {FLOW_STEPS.map((label) => (
           <Step key={label}>
-            {index === 0 ? (
-              <StepButton onClick={goToChat}>{label}</StepButton>
-            ) : index === 1 ? (
-              <StepButton onClick={goToEdit}>{label}</StepButton>
-            ) : (
-              <StepButton
-                onClick={() => {
-                  if (!previewItems.length) {
-                    setStatus({ type: 'error', message: '请先生成预览。' });
-                    setActiveCard('edit');
-                    return;
-                  }
-                  setActiveCard('preview');
-                }}
-              >
-                {label}
-              </StepButton>
-            )}
+            <StepLabel>{label}</StepLabel>
           </Step>
         ))}
       </Stepper>
 
-      <Box sx={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        {CARD_ORDER.map((key, index) => {
-          const size = CARD_SIZES[key];
-          return (
-            <Box key={key} sx={cardStyleFor(index)}>
-              <Card
-                sx={{
-                  width: size.width,
-                  height: size.height,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  overflow: 'hidden',
-                  boxShadow: '0 24px 80px rgba(15, 23, 42, 0.14)',
-                }}
-              >
-                {key === 'chat' ? (
-                  <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
-                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                      <Box>
-                        <Typography variant="h6">步骤 1：对话澄清</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          多轮对话 + 选择题，明确需求
-                        </Typography>
-                      </Box>
-                      <Chip label={isFormComplete ? '可进入编辑' : '待完成'} size="small" />
-                    </Stack>
-
-                    <Paper
-                      ref={scrollRef}
-                      variant="outlined"
-                      sx={{
-                        flex: 1,
-                        minHeight: 0,
-                        overflowY: 'auto',
-                        p: 1.5,
-                        backgroundColor: '#f9fafb',
-                      }}
-                    >
-                      <Stack spacing={1.2}>
-                        {messages.map((msg, idx) => (
-                          <Box
-                            key={`${msg.role}-${idx}`}
-                            sx={{
-                              display: 'flex',
-                              justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                            }}
-                          >
-                            <Box
-                              sx={{
-                                px: 1.5,
-                                py: 1,
-                                maxWidth: '84%',
-                                borderRadius: 2,
-                                backgroundColor: msg.role === 'user' ? 'primary.main' : 'grey.100',
-                                color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary',
-                              }}
-                            >
-                              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                                {msg.text}
-                                {msg.typing ? <LoadingDots /> : null}
-                              </Typography>
-                              {!msg.typing && msg.form?.length ? (
-                                <Box sx={{ mt: 1 }}>
-                                  <Card variant="outlined" sx={{ bgcolor: 'background.paper' }}>
-                                    <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
-                                      <Typography variant="subtitle2" gutterBottom>
-                                        选择题表单
-                                      </Typography>
-                                      <Stack spacing={1.5}>
-                                        {normalizeForm(msg.form).map((section, sectionIndex) => (
-                                          <Box key={`${section.title}-${sectionIndex}`}>
-                                            <Typography
-                                              variant="caption"
-                                              sx={{ opacity: 0.9, display: 'block' }}
-                                            >
-                                              {section.title}
-                                            </Typography>
-                                            <Stack
-                                              direction="row"
-                                              spacing={1}
-                                              flexWrap="wrap"
-                                              useFlexGap
-                                              sx={{ mt: 0.5 }}
-                                            >
-                                              {(Array.isArray(section.options)
-                                                ? section.options
-                                                : []
-                                              ).map((opt) => {
-                                                const selected = selectedOptions[section.title]?.includes(opt);
-                                                return (
-                                                  <Chip
-                                                    key={opt}
-                                                    label={opt}
-                                                    size="small"
-                                                    clickable
-                                                    color={selected ? 'primary' : 'default'}
-                                                    variant={selected ? 'filled' : 'outlined'}
-                                                    onClick={() => toggleOption(section.title, opt)}
-                                                  />
-                                                );
-                                              })}
-                                            </Stack>
-                                          </Box>
-                                        ))}
-                                        {msg.form.length > 0 && !isFormComplete ? (
-                                          <Typography variant="caption" color="error">
-                                            请为每项至少选择一个选项，才能进入编辑界面。
-                                          </Typography>
-                                        ) : null}
-                                      </Stack>
-                                    </CardContent>
-                                  </Card>
-                                </Box>
-                              ) : null}
-                            </Box>
-                          </Box>
-                        ))}
-                      </Stack>
-                    </Paper>
-
-                    <Box sx={{ display: 'flex', gap: 1 }}>
-                      <TextField
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        placeholder="请输入你想生成的内容"
-                        fullWidth
-                        multiline
-                        minRows={2}
-                        onKeyDown={(e) => {
-                          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                            e.preventDefault();
-                            handleSend();
-                          }
-                        }}
-                      />
-                      <IconButton color="primary" onClick={handleSend} disabled={isSending}>
-                        <SendIcon />
-                      </IconButton>
-                    </Box>
-                  </CardContent>
-                ) : null}
-
-                {key === 'edit' ? (
-                  <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
-                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                      <Box>
-                        <Typography variant="h6">步骤 2：编辑与素材</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          配置素材与表单，准备预览
-                        </Typography>
-                      </Box>
-                      <Chip label={layoutConfig ? '已就绪' : '待生成'} size="small" />
-                    </Stack>
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={handleGenerateAllSlots}
-                        disabled={isWorking || !layoutConfig}
-                      >
-                        一键生成全部素材
-                      </Button>
-                      <Typography variant="caption" color="text.secondary">
-                        已有素材将自动跳过
-                      </Typography>
-                    </Stack>
-                    <Typography variant="body2" color="text.secondary">
-                      画幅：{aspectRatio}
+      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', pb: 12, pr: 1 }}>
+        <ResponsiveGridLayout
+          className="scene-dashboard-grid"
+          layouts={layouts}
+          breakpoints={GRID_BREAKPOINTS}
+          cols={GRID_COLS}
+          rowHeight={GRID_ROW_HEIGHT}
+          margin={GRID_MARGIN}
+          containerPadding={[8, 8]}
+          isDraggable={false}
+          isResizable={false}
+          compactType="vertical"
+          useCSSTransforms
+        >
+          <div key="chat">
+            <Card
+              sx={{
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)',
+              }}
+            >
+              <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0 }}>
+                <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                  <Box>
+                    <Typography variant="h6">聊天窗</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      多轮对话澄清需求
                     </Typography>
-                    <Divider />
+                  </Box>
+                  <Chip
+                    label={hasForm ? (isFormComplete ? '可进入编辑' : '待完成') : '待生成'}
+                    size="small"
+                  />
+                </Stack>
 
-                    <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', pr: 1 }}>
-                      {layoutConfig ? (
-                        <>
-                          <Typography variant="subtitle2" gutterBottom>
-                            生成目标概要
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                            {layoutConfig.meta?.summary || '在下方配置素材，完成后生成预览。'}
-                          </Typography>
-                          {generatedPrompt ? (
-                            <TextField
-                              value={generatedPrompt}
-                              fullWidth
-                              multiline
-                              minRows={3}
-                              label="提示词（只读）"
-                              InputProps={{ readOnly: true }}
-                            />
-                          ) : null}
-                          <Divider sx={{ my: 2 }} />
-                          <DynamicRenderer
-                            config={layoutConfig}
-                            state={uiState}
-                            onStateChange={handleStateChange}
-                            onSlotUpload={handleSlotUpload}
-                            onSlotGenerate={handleSlotGenerate}
-                            onSlotRemoveBackground={handleSlotRemoveBackground}
-                            disabled={isWorking}
-                          />
-                        </>
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">
-                          请先完成对话并生成编辑界面。
-                        </Typography>
-                      )}
-                    </Box>
-                  </CardContent>
-                ) : null}
-
-                {key === 'preview' ? (
-                  <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
-                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                      <Box>
-                        <Typography variant="h6">步骤 3：预览与入画布</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          查看合成效果并导入画布
-                        </Typography>
-                      </Box>
-                      <Chip
-                        label={previewItems.length ? `已生成 ${previewItems.length} 层` : '待生成'}
-                        size="small"
-                      />
-                    </Stack>
-
-                    <Box
-                      sx={{
-                        position: 'relative',
-                        width: '100%',
-                        borderRadius: 2,
-                        overflow: 'hidden',
-                        border: '1px solid',
-                        borderColor: 'grey.200',
-                        pb: `${100 / parseAspectRatio(aspectRatio)}%`,
-                        backgroundColor: '#f4f6f8',
-                      }}
-                    >
+                <Paper
+                  ref={scrollRef}
+                  variant="outlined"
+                  sx={{
+                    flex: 1,
+                    minHeight: 0,
+                    overflowY: 'auto',
+                    p: 1.5,
+                    backgroundColor: '#f9fafb',
+                  }}
+                >
+                  <Stack spacing={1.2}>
+                    {messages.map((msg, idx) => (
                       <Box
+                        key={`${msg.role}-${idx}`}
                         sx={{
-                          position: 'absolute',
-                          inset: 0,
-                          backgroundImage: previewData.bgSlot?.uri
-                            ? `url(${previewData.bgSlot.uri})`
-                            : `url(${buildPlaceholderDataUrl('background', 720, 480)})`,
-                          backgroundSize: 'cover',
-                          backgroundPosition: 'center',
+                          display: 'flex',
+                          justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
                         }}
-                      />
-                      {previewData.subjects.slice(0, 4).map((slot, idx) => {
-                        const positions = [
-                          { left: '18%', top: '32%' },
-                          { left: '68%', top: '30%' },
-                          { left: '28%', top: '68%' },
-                          { left: '68%', top: '66%' },
-                        ];
-                        const position = positions[idx] || positions[0];
-                        return (
-                          <Box
-                            key={slot.id}
-                            sx={{
-                              position: 'absolute',
-                              width: '30%',
-                              aspectRatio: '1 / 1',
-                              left: position.left,
-                              top: position.top,
-                              transform: 'translate(-50%, -50%)',
-                              borderRadius: 1,
-                              overflow: 'hidden',
-                              border: '1px solid rgba(0,0,0,0.08)',
-                              backgroundColor: '#fff',
-                            }}
-                          >
-                            {slot.uri ? (
-                              <Box
-                                component="img"
-                                src={slot.uri}
-                                sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                              />
-                            ) : (
-                              <Box
-                                sx={{
-                                  width: '100%',
-                                  height: '100%',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  fontSize: 12,
-                                  color: 'text.secondary',
-                                }}
-                              >
-                                未生成
-                              </Box>
-                            )}
-                          </Box>
-                        );
-                      })}
-                    </Box>
-
-                    <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', pr: 1 }}>
-                      <Typography variant="subtitle2" gutterBottom>
-                        当前选择
-                      </Typography>
-                      {Object.keys(selectedOptions).length === 0 ? (
-                        <Typography variant="body2" color="text.secondary">
-                          暂无
-                        </Typography>
-                      ) : (
-                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                          {Object.entries(selectedOptions).flatMap(([k, values]) =>
-                            values.map((v) => <Chip key={`${k}:${v}`} label={`${k}: ${v}`} size="small" />),
-                          )}
-                        </Stack>
-                      )}
-
-                      <Divider sx={{ my: 2 }} />
-                      <Typography variant="subtitle2" gutterBottom>
-                        素材准备情况
-                      </Typography>
-                      {mediaSlots.length === 0 ? (
-                        <Typography variant="body2" color="text.secondary">
-                          还没有素材槽位。
-                        </Typography>
-                      ) : (
-                        <Stack spacing={1}>
-                          {mediaSlots.map((slot) => (
-                            <Box key={slot.id}>
-                              <Typography variant="subtitle2">
-                                {slot.label} {slot.uri ? '✅' : '—'}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {slot.uri ? (slot.hasTransparentBg ? '已抠图' : '未抠图') : '未准备'}
-                              </Typography>
-                            </Box>
-                          ))}
-                        </Stack>
-                      )}
-
-                      <Divider sx={{ my: 2 }} />
-                      <Typography variant="subtitle2" gutterBottom>
-                        对话记录
-                      </Typography>
-                      <TextField
-                        value={chatHistorySnapshot || chatHistory}
-                        fullWidth
-                        multiline
-                        minRows={4}
-                        InputProps={{ readOnly: true }}
-                      />
-                    </Box>
-                  </CardContent>
-                ) : null}
-
-                {key === 'quick' ? (
-                  <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
-                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                      <Box>
-                        <Typography variant="h6">快速模式</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          单步生成，直接入画布
-                        </Typography>
+                      >
+                        <Box
+                          sx={{
+                            px: 1.5,
+                            py: 1,
+                            maxWidth: '84%',
+                            borderRadius: 2,
+                            backgroundColor: msg.role === 'user' ? 'primary.main' : 'grey.100',
+                            color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary',
+                          }}
+                        >
+                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                            {msg.text}
+                            {msg.typing ? <LoadingDots /> : null}
+                          </Typography>
+                        </Box>
                       </Box>
-                      <Chip label="单图" size="small" />
-                    </Stack>
+                    ))}
+                  </Stack>
+                </Paper>
+
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <TextField
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="请输入你想生成的内容"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                  />
+                  <IconButton color="primary" onClick={handleSend} disabled={isSending}>
+                    <SendIcon />
+                  </IconButton>
+                </Box>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div key="form">
+            <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
+              <CardContent
+                sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%', overflowY: 'auto' }}
+              >
+                <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                  <Box>
+                    <Typography variant="h6">表单卡片</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      选择题结果决定编辑项
+                    </Typography>
+                  </Box>
+                  <Chip
+                    label={hasForm ? (isFormComplete ? '已完成' : '待选择') : '待生成'}
+                    size="small"
+                  />
+                </Stack>
+
+                {latestForm?.length ? (
+                  <Stack spacing={1.5}>
+                    {latestForm.map((section, sectionIndex) => (
+                      <Box key={`${section.title}-${sectionIndex}`}>
+                        <Typography variant="caption" sx={{ opacity: 0.9, display: 'block' }}>
+                          {section.title}
+                        </Typography>
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+                          {(Array.isArray(section.options) ? section.options : []).map((opt) => {
+                            const selected = selectedOptions[section.title]?.includes(opt);
+                            return (
+                              <Chip
+                                key={opt}
+                                label={opt}
+                                size="small"
+                                clickable
+                                color={selected ? 'primary' : 'default'}
+                                variant={selected ? 'filled' : 'outlined'}
+                                onClick={() => toggleOption(section.title, opt)}
+                              />
+                            );
+                          })}
+                        </Stack>
+                      </Box>
+                    ))}
+                    {!isFormComplete ? (
+                      <Typography variant="caption" color="error">
+                        请为每项至少选择一个选项，才能进入编辑界面。
+                      </Typography>
+                    ) : null}
+                  </Stack>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    暂无表单，请先在聊天中描述需求。
+                  </Typography>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {layoutConfig ? (
+            <div key="summary">
+              <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
+                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                  <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                    <Box>
+                      <Typography variant="h6">编辑目标概要</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        当前配置摘要
+                      </Typography>
+                    </Box>
+                    <Chip label="编辑阶段" size="small" />
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary">
+                    {layoutConfig.meta?.summary || '在下方配置素材，完成后生成预览。'}
+                  </Typography>
+                  {generatedPrompt ? (
                     <TextField
-                      label="快速提示词"
-                      value={quickPrompt}
-                      onChange={(e) => setQuickPrompt(e.target.value)}
+                      value={generatedPrompt}
                       fullWidth
                       multiline
                       minRows={2}
+                      label="提示词（只读）"
+                      InputProps={{ readOnly: true }}
                     />
-                    <Stack direction="row" spacing={1}>
-                      <Button variant="contained" onClick={handleQuickGenerate} disabled={quickLoading}>
-                        生成
-                      </Button>
-                      <Button variant="outlined" onClick={handleQuickAddToCanvas} disabled={!quickImage}>
-                        送入画布
-                      </Button>
-                    </Stack>
-                    {quickLoading ? <LinearProgress /> : null}
-                    {quickStatus.message ? (
-                      <Alert severity={quickStatus.type === 'error' ? 'error' : 'info'}>
-                        {quickStatus.message}
-                      </Alert>
-                    ) : null}
-                    {quickImage ? (
-                      <Box
-                        component="img"
-                        src={quickImage}
-                        alt="quick-result"
-                        sx={{
-                          width: '100%',
-                          maxHeight: 260,
-                          objectFit: 'cover',
-                          borderRadius: 1,
-                          border: '1px solid',
-                          borderColor: 'grey.200',
-                        }}
-                      />
-                    ) : null}
-                  </CardContent>
-                ) : null}
+                  ) : null}
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={handleGenerateAllSlots}
+                      disabled={isWorking || !layoutConfig}
+                    >
+                      一键生成全部素材
+                    </Button>
+                    <Typography variant="caption" color="text.secondary">
+                      已有素材将自动跳过
+                    </Typography>
+                  </Stack>
+                </CardContent>
               </Card>
-            </Box>
-          );
-        })}
+            </div>
+          ) : null}
+
+          {layoutConfig
+            ? (layoutConfig.sections ?? []).map((section) => (
+                <div key={`section-${section.id}`}>
+                  <SectionCard
+                    section={section as LayoutSection}
+                    state={uiState}
+                    onStateChange={handleStateChange}
+                    onSlotUpload={handleSlotUpload}
+                    onSlotGenerate={handleSlotGenerate}
+                    onSlotRemoveBackground={handleSlotRemoveBackground}
+                    disabled={isWorking}
+                  />
+                </div>
+              ))
+            : null}
+
+          {layoutConfig ? (
+            <div key="preview">
+              <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
+                <CardContent
+                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%', overflowY: 'auto' }}
+                >
+                  <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                    <Box>
+                      <Typography variant="h6">预览卡片</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        素材与合成结果概览
+                      </Typography>
+                    </Box>
+                    <Chip label={previewItems.length ? `已生成 ${previewItems.length} 层` : '待生成'} size="small" />
+                  </Stack>
+
+                  <Box
+                    sx={{
+                      position: 'relative',
+                      width: '100%',
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                      border: '1px solid',
+                      borderColor: 'grey.200',
+                      pb: `${100 / parseAspectRatio(aspectRatio)}%`,
+                      backgroundColor: '#f4f6f8',
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        position: 'absolute',
+                        inset: 0,
+                        backgroundImage: previewData.bgSlot?.uri
+                          ? `url(${previewData.bgSlot.uri})`
+                          : `url(${buildPlaceholderDataUrl('background', 720, 480)})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                      }}
+                    />
+                    {previewData.subjects.slice(0, 4).map((slot, idx) => {
+                      const positions = [
+                        { left: '18%', top: '32%' },
+                        { left: '68%', top: '30%' },
+                        { left: '28%', top: '68%' },
+                        { left: '68%', top: '66%' },
+                      ];
+                      const position = positions[idx] || positions[0];
+                      return (
+                        <Box
+                          key={slot.id}
+                          sx={{
+                            position: 'absolute',
+                            width: '30%',
+                            aspectRatio: '1 / 1',
+                            left: position.left,
+                            top: position.top,
+                            transform: 'translate(-50%, -50%)',
+                            borderRadius: 1,
+                            overflow: 'hidden',
+                            border: '1px solid rgba(0,0,0,0.08)',
+                            backgroundColor: '#fff',
+                          }}
+                        >
+                          {slot.uri ? (
+                            <Box
+                              component="img"
+                              src={slot.uri}
+                              sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            />
+                          ) : (
+                            <Box
+                              sx={{
+                                width: '100%',
+                                height: '100%',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: 12,
+                                color: 'text.secondary',
+                              }}
+                            >
+                              未生成
+                            </Box>
+                          )}
+                        </Box>
+                      );
+                    })}
+                  </Box>
+
+                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                    {Object.entries(selectedOptions).flatMap(([k, values]) =>
+                      values.map((v) => <Chip key={`${k}:${v}`} label={`${k}: ${v}`} size="small" />),
+                    )}
+                  </Stack>
+                </CardContent>
+              </Card>
+            </div>
+          ) : null}
+
+          {showQuick ? (
+            <div key="quick">
+              <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
+                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%' }}>
+                  <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                    <Box>
+                      <Typography variant="h6">快速模式</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        单步生成，直接入画布
+                      </Typography>
+                    </Box>
+                    <Chip label="单图" size="small" />
+                  </Stack>
+                  <TextField
+                    label="快速提示词"
+                    value={quickPrompt}
+                    onChange={(e) => setQuickPrompt(e.target.value)}
+                    fullWidth
+                    multiline
+                    minRows={2}
+                  />
+                  <Stack direction="row" spacing={1}>
+                    <Button variant="contained" onClick={handleQuickGenerate} disabled={quickLoading}>
+                      生成
+                    </Button>
+                    <Button variant="outlined" onClick={handleQuickAddToCanvas} disabled={!quickImage}>
+                      送入画布
+                    </Button>
+                  </Stack>
+                  {quickLoading ? <LinearProgress /> : null}
+                  {quickStatus.message ? (
+                    <Alert severity={quickStatus.type === 'error' ? 'error' : 'info'}>
+                      {quickStatus.message}
+                    </Alert>
+                  ) : null}
+                  {quickImage ? (
+                    <Box
+                      component="img"
+                      src={quickImage}
+                      alt="quick-result"
+                      sx={{
+                        width: '100%',
+                        maxHeight: 260,
+                        objectFit: 'cover',
+                        borderRadius: 1,
+                        border: '1px solid',
+                        borderColor: 'grey.200',
+                      }}
+                    />
+                  ) : null}
+                </CardContent>
+              </Card>
+            </div>
+          ) : null}
+        </ResponsiveGridLayout>
       </Box>
 
       <Box
@@ -1192,6 +1090,47 @@ function normalizeForm(input: unknown): FormSection[] {
     sections.push({ title, options });
   });
   return sections;
+}
+
+type LayoutItemSpec = { i: string; w: number; h: number };
+
+function packGridItems(items: LayoutItemSpec[], cols: number): Layout[] {
+  const colHeights = Array.from({ length: cols }, () => 0);
+  return items.map((item) => {
+    const width = Math.max(1, Math.min(cols, item.w));
+    let bestX = 0;
+    let bestY = Number.POSITIVE_INFINITY;
+    for (let x = 0; x <= cols - width; x += 1) {
+      let y = 0;
+      for (let c = x; c < x + width; c += 1) {
+        y = Math.max(y, colHeights[c]);
+      }
+      if (y < bestY) {
+        bestY = y;
+        bestX = x;
+      }
+    }
+    for (let c = bestX; c < bestX + width; c += 1) {
+      colHeights[c] = bestY + item.h;
+    }
+    return { i: item.i, x: bestX, y: bestY, w: width, h: item.h, static: true };
+  });
+}
+
+function estimateSectionHeight(section: LayoutSection): number {
+  const components = section.components ?? [];
+  const types = components.map((comp) => comp.type);
+  if (types.includes('media-uploader')) return 10;
+  if (types.includes('prompt-editor')) return 8;
+  if (components.length >= 5) return 7;
+  if (components.length >= 3) return 6;
+  return 5;
+}
+
+function coerceNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
 }
 
 function initializeUiState(layoutConfig?: LayoutConfig): Record<string, any> {

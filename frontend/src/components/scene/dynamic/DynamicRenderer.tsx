@@ -23,16 +23,18 @@ import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
 
-type LayoutConfig = {
+export type LayoutConfig = {
   meta?: Record<string, any>;
   sections?: LayoutSection[];
 };
 
-type LayoutSection = {
+export type LayoutSection = {
   id: string;
   title?: string;
+  description?: string;
   layout?: {
     span?: number;
+    tone?: 'accent' | 'soft';
   };
   components?: LayoutComponent[];
 };
@@ -71,11 +73,13 @@ type TextareaComponent = BaseComponent & {
 type SelectComponent = BaseComponent & {
   type: 'select';
   options: string[];
+  display?: 'chips';
 };
 
 type MultiSelectComponent = BaseComponent & {
   type: 'multi-select';
   options: string[];
+  display?: 'chips';
 };
 
 type NumberInputComponent = BaseComponent & {
@@ -153,6 +157,8 @@ type DynamicRendererProps = {
   onSlotGenerate: (componentId: string, slot: MediaSlot) => void;
   onSlotRemoveBackground: (componentId: string, slot: MediaSlot) => void;
   disabled?: boolean;
+  renderMode?: 'grid' | 'items';
+  containerSx?: Record<string, any>;
 };
 
 const DynamicRenderer: React.FC<DynamicRendererProps> = ({
@@ -163,6 +169,8 @@ const DynamicRenderer: React.FC<DynamicRendererProps> = ({
   onSlotGenerate,
   onSlotRemoveBackground,
   disabled,
+  renderMode = 'grid',
+  containerSx,
 }) => {
   const sections = config.sections ?? [];
   const layoutMeta = (config.meta ?? {}).layout ?? {};
@@ -175,6 +183,42 @@ const DynamicRenderer: React.FC<DynamicRendererProps> = ({
       ? { xs: '1fr', lg: `repeat(${Math.max(1, Math.floor(columns))}, minmax(0, 1fr))` }
       : { xs: '1fr', lg: `repeat(auto-fit, minmax(${Math.max(240, Math.floor(minCardWidth))}px, 1fr))` };
 
+  const renderSectionCard = (section: LayoutSection) => {
+    const span = coerceNumber(section.layout?.span);
+    const columnSpan = span && span > 0 ? Math.floor(span) : undefined;
+    const gridColumn = columnSpan ? { xs: 'auto', lg: `span ${columnSpan}` } : 'auto';
+    const tone = section.layout?.tone;
+    const cardToneStyle =
+      tone === 'accent'
+        ? {
+            borderColor: 'primary.light',
+            backgroundColor: 'rgba(33, 150, 243, 0.05)',
+          }
+        : tone === 'soft'
+          ? {
+              backgroundColor: 'rgba(15, 23, 42, 0.03)',
+            }
+          : {};
+    return (
+      <SectionCard
+        key={section.id}
+        section={section}
+        gridColumn={gridColumn}
+        cardToneStyle={cardToneStyle}
+        state={state}
+        onStateChange={onStateChange}
+        onSlotUpload={onSlotUpload}
+        onSlotGenerate={onSlotGenerate}
+        onSlotRemoveBackground={onSlotRemoveBackground}
+        disabled={disabled}
+      />
+    );
+  };
+
+  if (renderMode === 'items') {
+    return <>{sections.map((section) => renderSectionCard(section))}</>;
+  }
+
   return (
     <Box
       sx={{
@@ -183,51 +227,84 @@ const DynamicRenderer: React.FC<DynamicRendererProps> = ({
         gap: gapValue,
         gridAutoFlow: dense ? 'dense' : 'row',
         alignItems: 'start',
+        ...containerSx,
       }}
     >
-      {sections.map((section) => {
-        const span = coerceNumber(section.layout?.span);
-        const columnSpan = span && span > 0 ? Math.floor(span) : undefined;
-        const gridColumn = columnSpan ? { xs: 'auto', lg: `span ${columnSpan}` } : 'auto';
-        return (
-          <Card
-            key={section.id}
-            variant="outlined"
-            sx={{
-              gridColumn,
-              minWidth: 0,
-            }}
-          >
-            <CardContent>
-              {section.title ? (
-                <Typography variant="h6" gutterBottom>
-                  {section.title}
-                </Typography>
-              ) : null}
-              <Stack spacing={2}>
-                {(section.components ?? []).map((component) => (
-                  <Box key={component.id}>
-                    <ComponentRenderer
-                      component={component}
-                      value={state[component.id]}
-                      onChange={(value) => onStateChange(component.id, value)}
-                      onSlotUpload={(slotId, file) => onSlotUpload(component.id, slotId, file)}
-                      onSlotGenerate={(slot) => onSlotGenerate(component.id, slot)}
-                      onSlotRemoveBackground={(slot) => onSlotRemoveBackground(component.id, slot)}
-                      disabled={disabled}
-                    />
-                  </Box>
-                ))}
-              </Stack>
-            </CardContent>
-          </Card>
-        );
-      })}
+      {sections.map((section) => renderSectionCard(section))}
     </Box>
   );
 };
 
 export default DynamicRenderer;
+
+type SectionCardProps = {
+  section: LayoutSection;
+  gridColumn?: any;
+  cardToneStyle?: Record<string, any>;
+  state: Record<string, any>;
+  onStateChange: (componentId: string, value: any) => void;
+  onSlotUpload: (componentId: string, slotId: string, file: File) => void;
+  onSlotGenerate: (componentId: string, slot: MediaSlot) => void;
+  onSlotRemoveBackground: (componentId: string, slot: MediaSlot) => void;
+  disabled?: boolean;
+};
+
+export const SectionCard: React.FC<SectionCardProps> = ({
+  section,
+  gridColumn,
+  cardToneStyle,
+  state,
+  onStateChange,
+  onSlotUpload,
+  onSlotGenerate,
+  onSlotRemoveBackground,
+  disabled,
+}) => {
+  return (
+    <Card
+      variant="outlined"
+      sx={{
+        gridColumn,
+        minWidth: 0,
+        height: '100%',
+        boxShadow: '0 12px 28px rgba(15, 23, 42, 0.08)',
+        borderRadius: 2,
+        alignSelf: 'start',
+        ...cardToneStyle,
+      }}
+    >
+      <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        {section.title ? (
+          <Typography variant="h6" gutterBottom>
+            {section.title}
+          </Typography>
+        ) : null}
+        {section.description ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            {section.description}
+          </Typography>
+        ) : null}
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          <Stack spacing={2}>
+            {(section.components ?? []).map((component) => (
+              <Box key={component.id}>
+                <ComponentRenderer
+                  component={component}
+                  value={state[component.id]}
+                  onChange={(value) => onStateChange(component.id, value)}
+                  onSlotUpload={(slotId, file) => onSlotUpload(component.id, slotId, file)}
+                  onSlotGenerate={(slot) => onSlotGenerate(component.id, slot)}
+                  onSlotRemoveBackground={(slot) => onSlotRemoveBackground(component.id, slot)}
+                  disabled={disabled}
+                />
+              </Box>
+            ))}
+          </Stack>
+        </Box>
+      </CardContent>
+    </Card>
+  );
+};
 
 type ComponentRendererProps = {
   component: LayoutComponent;
@@ -316,6 +393,33 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
         />
       );
     case 'select':
+      if (component.display === 'chips') {
+        const currentValue = value ?? component.default ?? component.options?.[0] ?? '';
+        return (
+          <Box>
+            {component.label ? (
+              <Typography variant="body2" gutterBottom>
+                {component.label}
+              </Typography>
+            ) : null}
+            <ToggleButtonGroup
+              exclusive
+              value={currentValue}
+              onChange={(_, nextValue) => {
+                if (nextValue !== null) onChange(nextValue);
+              }}
+              size="small"
+              disabled={disabled}
+            >
+              {(component.options ?? []).map((opt) => (
+                <ToggleButton key={opt} value={opt}>
+                  {opt}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+          </Box>
+        );
+      }
       return (
         <FormControl fullWidth disabled={disabled}>
           <InputLabel>{component.label}</InputLabel>
@@ -334,6 +438,37 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
       );
     case 'multi-select': {
       const values = Array.isArray(value) ? value : component.default ?? [];
+      if (component.display === 'chips') {
+        return (
+          <Box>
+            {component.label ? (
+              <Typography variant="body2" gutterBottom>
+                {component.label}
+              </Typography>
+            ) : null}
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              {(component.options ?? []).map((opt) => {
+                const selected = values.includes(opt);
+                return (
+                  <Chip
+                    key={opt}
+                    label={opt}
+                    size="small"
+                    clickable
+                    color={selected ? 'primary' : 'default'}
+                    variant={selected ? 'filled' : 'outlined'}
+                    onClick={() => {
+                      if (disabled) return;
+                      const next = selected ? values.filter((v) => v !== opt) : [...values, opt];
+                      onChange(next);
+                    }}
+                  />
+                );
+              })}
+            </Stack>
+          </Box>
+        );
+      }
       return (
         <FormControl fullWidth disabled={disabled}>
           <InputLabel>{component.label}</InputLabel>

@@ -820,25 +820,18 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             "aspect_ratio_field": "scene-aspect",
             "schema_version": LAYOUT_SCHEMA_VERSION,
             "layout": {
-                "columns": 2,
-                "minCardWidth": 360,
-                "gap": 3,
+                "columns": 3,
+                "minCardWidth": 280,
+                "gap": 2,
                 "dense": True,
             },
         },
         "sections": [
             {
                 "id": "base",
-                "title": "基础设置",
+                "title": "场景基础",
+                "description": "命名、比例与核心描述",
                 "components": [
-                    {
-                        "id": "scene-aspect",
-                        "type": "ratio-select",
-                        "label": "画幅比例",
-                        "options": ["3:4", "1:1", "16:9", "9:16"],
-                        "default": aspect_ratio,
-                        "helperText": "用于预览与导出比例",
-                    },
                     {
                         "id": "scene-title",
                         "type": "text-input",
@@ -847,18 +840,12 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                         "default": prompt[:20] if prompt else "",
                     },
                     {
-                        "id": "scene-style",
-                        "type": "select",
-                        "label": "风格方向",
-                        "options": style_options,
-                        "default": style_default,
-                    },
-                    {
-                        "id": "scene-mood",
-                        "type": "multi-select",
-                        "label": "情绪氛围",
-                        "options": mood_options,
-                        "default": mood_defaults,
+                        "id": "scene-aspect",
+                        "type": "ratio-select",
+                        "label": "画幅比例",
+                        "options": ["3:4", "1:1", "16:9", "9:16"],
+                        "default": aspect_ratio,
+                        "helperText": "用于预览与导出比例",
                     },
                     {
                         "id": "scene-notes",
@@ -869,9 +856,45 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                 ],
             },
             {
+                "id": "style",
+                "title": "风格与氛围",
+                "description": "更偏向视觉方向的选择",
+                "components": [
+                    {
+                        "id": "scene-style",
+                        "type": "select",
+                        "label": "风格方向",
+                        "options": style_options,
+                        "default": style_default,
+                        "display": "chips",
+                    },
+                    {
+                        "id": "scene-mood",
+                        "type": "multi-select",
+                        "label": "情绪氛围",
+                        "options": mood_options,
+                        "default": mood_defaults,
+                        "display": "chips",
+                    },
+                    {
+                        "id": "color-tone",
+                        "type": "color-palette",
+                        "label": "主色调",
+                        "options": [
+                            {"value": "暖色", "label": "暖色", "color": "#F4A261"},
+                            {"value": "冷色", "label": "冷色", "color": "#5DADE2"},
+                            {"value": "高对比", "label": "高对比", "color": "#1F1F1F"},
+                            {"value": "粉彩", "label": "粉彩", "color": "#F7C7D9"},
+                        ],
+                        "default": "暖色",
+                    },
+                ],
+            },
+            {
                 "id": "prompt",
                 "title": "提示词",
-                "layout": {"span": 2},
+                "description": "编辑生成核心提示词",
+                "layout": {"span": 2, "tone": "accent"},
                 "components": [
                     {
                         "id": "prompt-editor",
@@ -897,6 +920,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             {
                 "id": "generation",
                 "title": "生成参数",
+                "description": "基础生成控制项",
                 "components": [
                     {
                         "id": "cfg-scale",
@@ -926,24 +950,13 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                         "default": False,
                         "helperText": "开启后多次生成更稳定",
                     },
-                    {
-                        "id": "color-tone",
-                        "type": "color-palette",
-                        "label": "主色调",
-                        "options": [
-                            {"value": "暖色", "label": "暖色", "color": "#F4A261"},
-                            {"value": "冷色", "label": "冷色", "color": "#5DADE2"},
-                            {"value": "高对比", "label": "高对比", "color": "#1F1F1F"},
-                            {"value": "粉彩", "label": "粉彩", "color": "#F7C7D9"},
-                        ],
-                        "default": "暖色",
-                    },
                 ],
             },
             {
                 "id": "materials",
                 "title": "素材准备",
-                "layout": {"span": 2},
+                "description": "上传或生成素材图层",
+                "layout": {"span": 2, "tone": "soft"},
                 "components": [
                     {
                         "id": "materials-uploader",
@@ -1089,9 +1102,15 @@ def _normalize_section_layout(raw_layout) -> Optional[dict]:
     if not isinstance(raw_layout, dict):
         return None
     span = _coerce_number(raw_layout.get("span") or raw_layout.get("colSpan"))
-    if span is None or span <= 0:
-        return None
-    return {"span": int(max(1, span))}
+    tone = raw_layout.get("tone")
+    layout = {}
+    if span is not None and span > 0:
+        layout["span"] = int(max(1, span))
+    if isinstance(tone, str) and tone.strip():
+        normalized = tone.strip().lower()
+        if normalized in {"accent", "soft"}:
+            layout["tone"] = normalized
+    return layout or None
 
 
 def _extract_media_slots(layout_config: dict) -> List[dict]:
@@ -1259,6 +1278,11 @@ def _sanitize_components(raw_components, base_prompt: str, style: str, moods: Li
             if not options:
                 continue
             base["options"] = options[:8]
+            display = comp.get("display")
+            if isinstance(display, str) and display.strip():
+                display_value = display.strip().lower()
+                if display_value in {"chips"}:
+                    base["display"] = display_value
             default = comp.get("default")
             if comp_type in ("select", "ratio-select"):
                 if isinstance(default, str) and default in options:
@@ -1347,6 +1371,8 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
         section_id = _ensure_unique_id(section.get("id") or f"section-{idx + 1}", used_section_ids, "section")
         title = section.get("title")
         title = title.strip() if isinstance(title, str) and title.strip() else None
+        description = section.get("description")
+        description = description.strip() if isinstance(description, str) and description.strip() else None
         components = _sanitize_components(section.get("components"), base_prompt, style_default, mood_defaults, used_ids=used_component_ids)
         if not components:
             continue
@@ -1356,6 +1382,8 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
         entry = {"id": str(section_id), "components": components}
         if title:
             entry["title"] = title
+        if description:
+            entry["description"] = description
         section_layout = _normalize_section_layout(section.get("layout"))
         if section_layout:
             entry["layout"] = section_layout
@@ -1399,14 +1427,15 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         "输出必须是单个 JSON 对象，仅包含字段：text_response(string), layout_config(object)。\n"
         f"layout_config.meta 包含 sourcePrompt, summary, aspect_ratio, schema_version(固定为 {LAYOUT_SCHEMA_VERSION})，可选 aspect_ratio_field 与 layout。\n"
         "meta.layout 可包含 columns/minCardWidth/gap/dense。\n"
-        "layout_config.sections 为数组，每项包含 id, title, components，可选 layout(span)。\n"
+        "layout_config.sections 为数组，每项包含 id, title, components，可选 description 与 layout(span,tone)。tone 仅可为 accent/soft。\n"
         "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader, number-input, slider, toggle, ratio-select, color-palette, prompt-editor。\n"
-        "select/multi-select/ratio-select 需要 options(string[])。\n"
+        "select/multi-select/ratio-select 需要 options(string[])，可选 display:'chips' 以使用按钮样式。\n"
         "number-input/slider 可包含 min/max/step/default/unit/helperText。\n"
         "toggle 可包含 default(boolean)/helperText。\n"
         "color-palette 需要 options，支持 string 或 {value,label,color}。\n"
         "prompt-editor 需要 fields，fields 为 {id,label,placeholder,default,helperText}。\n"
         "media-uploader 组件可以先不填 slots 或仅给出占位，slots 会在第二步生成。\n"
+        "建议输出 4-6 个 sections，使用 3 列布局（columns=3, minCardWidth≈280, gap=2），并给出不同的 span 以形成仪表盘布局。\n"
         "请使用中文，不要包含多余解释或 Markdown。"
     )
     slots_system = (
