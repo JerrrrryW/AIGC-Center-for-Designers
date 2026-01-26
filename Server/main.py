@@ -2,7 +2,6 @@ from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-import torch
 from typing import List, Optional
 import shutil
 import os
@@ -13,12 +12,8 @@ import io
 import base64
 import urllib.request
 import urllib.error
-from diffusers import DiffusionPipeline
 from threading import Lock
 from PIL import Image, ImageDraw, ImageFont
-
-from .train_lora import TrainingConfig, start_training as run_lora_training
-from .captioning import caption_images
 
 app = FastAPI()
 
@@ -58,8 +53,85 @@ _pipe_cache = {
 }
 _pipe_lock = Lock()
 
+_torch = None
+_torch_error = None
+_diffusers_pipeline = None
+_diffusers_error = None
+_caption_images = None
+_captioning_error = None
+_training_api = None
+_training_error = None
+
+
+def _load_torch():
+    global _torch, _torch_error
+    if _torch is not None or _torch_error is not None:
+        return _torch
+    try:
+        import torch as _t
+        _torch = _t
+    except Exception as exc:
+        _torch_error = exc
+    return _torch
+
+
+def _load_diffusers():
+    global _diffusers_pipeline, _diffusers_error
+    if _diffusers_pipeline is not None or _diffusers_error is not None:
+        return _diffusers_pipeline
+    if _load_torch() is None:
+        _diffusers_error = RuntimeError("PyTorch 未就绪，无法加载 diffusers。")
+        return None
+    try:
+        from diffusers import DiffusionPipeline as _DP
+        _diffusers_pipeline = _DP
+    except Exception as exc:
+        _diffusers_error = exc
+    return _diffusers_pipeline
+
+
+def _load_captioning():
+    global _caption_images, _captioning_error
+    if _caption_images is not None or _captioning_error is not None:
+        return _caption_images
+    try:
+        from .captioning import caption_images as _ci
+        _caption_images = _ci
+    except Exception as exc:
+        _captioning_error = exc
+    return _caption_images
+
+
+def _load_training():
+    global _training_api, _training_error
+    if _training_api is not None or _training_error is not None:
+        return _training_api
+    try:
+        from .train_lora import TrainingConfig as _TC, start_training as _start
+        _training_api = (_TC, _start)
+    except Exception as exc:
+        _training_error = exc
+    return _training_api
+
+
+def _require_torch():
+    torch = _load_torch()
+    if torch is None:
+        raise RuntimeError(f"PyTorch 未就绪: {_torch_error}")
+    return torch
+
+
+def _require_diffusers():
+    pipeline = _load_diffusers()
+    if pipeline is None:
+        detail = _diffusers_error or _torch_error
+        raise RuntimeError(f"Diffusers 未就绪: {detail}")
+    return pipeline
+
 
 def _ensure_pipe(base_model_id: str):
+    torch = _require_torch()
+    DiffusionPipeline = _require_diffusers()
     if _pipe_cache["pipe"] is None or _pipe_cache["base_model"] != base_model_id:
         if _pipe_cache["pipe"] is not None:
             try:
@@ -1559,6 +1631,13 @@ def _create_layer(name: str, layer_type: str, prompt: str, width: int, height: i
 
 def run_inference_task(req: GenerateRequest):
     """The actual long-running task for generating an image."""
+    try:
+        torch = _require_torch()
+        DiffusionPipeline = _require_diffusers()
+    except Exception as e:
+        inference_status.update({"status": "failed", "message": str(e)})
+        return
+
     inference_status.update({
         "status": "loading",
         "progress": 0,
@@ -1689,6 +1768,9 @@ def run_caption_task(images_payload, prefix=None, suffix=None):
         }
     )
     try:
+        caption_images = _load_captioning()
+        if caption_images is None:
+            raise RuntimeError(f"Caption 模块未就绪: {_captioning_error}")
         caption_images(
             images_payload,
             prefix=prefix,
@@ -1703,7 +1785,11 @@ def run_caption_task(images_payload, prefix=None, suffix=None):
 async def start_generation(req: GenerateRequest, background_tasks: BackgroundTasks):
     if inference_status["status"] in ["loading", "processing"]:
         return {"status": "error", "message": "已有推理任务正在进行。"}
-    
+    try:
+        _require_diffusers()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
     background_tasks.add_task(run_inference_task, req)
     return {"status": "success", "message": "图片生成已在后台开始。"}
 
@@ -1933,6 +2019,7 @@ def generate_image(req: ImageRequest):
             image_b64 = _call_siliconflow_image(req.prompt, width, height, steps)
             return {"image_base64": image_b64}
 
+        torch = _require_torch()
         base_model_id = req.base_model or BASE_MODEL_DEFAULT
         lora_models = req.lora_models or []
         lora_models = [name for name in lora_models if name and name != "None"]
@@ -2109,10 +2196,13 @@ def analyze_layer_plan(payload: dict):
 @app.get("/check-mps")
 def check_mps():
     # ... (omitting unchanged endpoint for brevity)
+    try:
+        torch = _require_torch()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     if torch.backends.mps.is_available():
         return {"status": "success", "message": "MPS 可用，已准备好在 Mac 上进行 GPU 加速。"}
-    else:
-        return {"status": "error", "message": "MPS 不可用，服务器将使用 CPU。"}
+    return {"status": "error", "message": "MPS 不可用，服务器将使用 CPU。"}
 
 @app.get("/train/status")
 def get_training_status():
@@ -2135,6 +2225,11 @@ async def trigger_training(
 ):
     if training_status["status"] == "training":
         return {"status": "error", "message": "已有训练任务正在进行。"}
+
+    training_api = _load_training()
+    if training_api is None:
+        return {"status": "error", "message": f"训练模块未就绪: {_training_error}"}
+    TrainingConfig, run_lora_training = training_api
 
     image_dir = "temp_training_images"
     if os.path.exists(image_dir):
