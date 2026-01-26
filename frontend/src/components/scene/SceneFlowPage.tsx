@@ -28,8 +28,27 @@ import { SectionCard, type LayoutConfig, type LayoutSection, type MediaSlot } fr
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
-type ChatMessage = { role: 'user' | 'bot'; text: string; form?: FormSection[]; typing?: boolean };
-type FormSection = { title: string; options: string[] };
+type ChatMessage = { role: 'user' | 'bot'; text: string; questions?: QuestionItem[]; typing?: boolean };
+
+type QuestionType = 'single' | 'multi' | 'text';
+
+type QuestionItem = {
+  id: string;
+  title: string;
+  type: QuestionType;
+  options?: string[];
+  priority?: number;
+  allowSkip?: boolean;
+  placeholder?: string;
+};
+
+type AnswerValue = string | string[];
+
+type AnswerState = {
+  value?: AnswerValue;
+  skipped?: boolean;
+  updatedAt?: number;
+};
 
 type LayoutPayload = {
   layout_config?: any;
@@ -61,9 +80,18 @@ const SceneFlowPage: React.FC = () => {
     { role: 'bot', text: '你好！告诉我你想生成什么场景，我会先用选择题帮你把需求变清晰。' },
   ]);
   const [input, setInput] = useState('');
-  const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
+  const [answers, setAnswers] = useState<Record<string, AnswerState>>({});
+  const [lastCommittedAnswers, setLastCommittedAnswers] = useState<Record<string, AnswerState>>({});
+  const [boardDirtyMap, setBoardDirtyMap] = useState<Record<string, boolean>>({});
+  const [editingMap, setEditingMap] = useState<Record<string, boolean>>({});
+  const [textDrafts, setTextDrafts] = useState<Record<string, string>>({});
   const [isSending, setIsSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const sendingRef = useRef(false);
+  const pendingChatQueueRef = useRef<Array<{ text: string; forceForm?: boolean }>>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const answersRef = useRef<Record<string, AnswerState>>({});
+  const questionListRef = useRef<QuestionItem[]>([]);
 
   const [layoutConfig, setLayoutConfig] = useState<LayoutConfig | undefined>(undefined);
   const [generatedPrompt, setGeneratedPrompt] = useState('');
@@ -76,19 +104,48 @@ const SceneFlowPage: React.FC = () => {
   const [quickStatus, setQuickStatus] = useState<StatusState>({ type: 'idle', message: '' });
   const [quickLoading, setQuickLoading] = useState(false);
 
-  const latestForm = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i];
-      if (msg.role === 'bot' && msg.form?.length) return msg.form;
-    }
-    return null;
+  const questionContext = useMemo(() => {
+    const map = new Map<string, QuestionItem>();
+    const order: string[] = [];
+    messages.forEach((msg) => {
+      (msg.questions ?? []).forEach((question) => {
+        if (!map.has(question.id)) {
+          order.push(question.id);
+        }
+        map.set(question.id, question);
+      });
+    });
+    return { map, order };
   }, [messages]);
 
-  const isFormComplete = useMemo(() => {
-    if (!latestForm?.length) return true;
-    return latestForm.every((section) => (selectedOptions[section.title] ?? []).length > 0);
-  }, [latestForm, selectedOptions]);
-  const hasForm = Boolean(latestForm?.length);
+  const questionList = useMemo(
+    () => questionContext.order.map((id) => questionContext.map.get(id)).filter(Boolean) as QuestionItem[],
+    [questionContext],
+  );
+
+  const selectedOptions = useMemo(
+    () => buildSelectedOptionsPayload(questionList, answers),
+    [answers, questionList],
+  );
+
+  const pendingQuestions = useMemo(() => {
+    const orderIndex = new Map(questionContext.order.map((id, idx) => [id, idx]));
+    return questionList
+      .filter((question) => !isAnswerResolved(answers[question.id]))
+      .sort((a, b) => {
+        const priorityA = a.priority ?? 3;
+        const priorityB = b.priority ?? 3;
+        if (priorityA !== priorityB) return priorityA - priorityB;
+        return (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0);
+      });
+  }, [answers, questionContext.order, questionList]);
+
+  const confirmedQuestions = useMemo(
+    () => questionList.filter((question) => isAnswerResolved(answers[question.id])),
+    [answers, questionList],
+  );
+
+  const hasQuestions = questionList.length > 0;
 
   const chatHistory = useMemo(() => {
     return messages
@@ -121,66 +178,200 @@ const SceneFlowPage: React.FC = () => {
     });
   }, [layoutConfig]);
 
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
+  useEffect(() => {
+    questionListRef.current = questionList;
+  }, [questionList]);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, []);
 
-  const toggleOption = useCallback((title: string, option: string) => {
-    setSelectedOptions((prev) => {
-      const current = prev[title] ?? [];
-      const next = current.includes(option)
-        ? current.filter((v) => v !== option)
-        : [...current, option];
-      return { ...prev, [title]: next };
-    });
-  }, []);
+  const sendChatMessage = useCallback(
+    async (text: string, options?: { forceForm?: boolean }) => {
+      const value = text.trim();
+      if (!value) return;
+      if (sendingRef.current) {
+        pendingChatQueueRef.current.push({ text: value, forceForm: options?.forceForm });
+        return;
+      }
+      sendingRef.current = true;
+      setIsSending(true);
+      setStatus({ type: 'loading', message: '正在生成对话回复...' });
+      const nextMessages = [...messagesRef.current, { role: 'user' as const, text: value }];
+      setMessages([...nextMessages, { role: 'bot', text: 'Agent 输入中...', typing: true }]);
+      queueMicrotask(scrollToBottom);
+
+      const answersSnapshot = cloneAnswerState(answersRef.current);
+      const selectedSnapshot = buildSelectedOptionsPayload(questionListRef.current, answersSnapshot);
+      try {
+        const res = await api.post('/chat', {
+          messages: nextMessages.map((m) => ({
+            role: m.role === 'bot' ? 'assistant' : 'user',
+            content: m.text,
+          })),
+          selected_options: selectedSnapshot,
+          force_form: Boolean(options?.forceForm),
+        });
+        const obj = res.data?.json_object ?? res.data;
+        const botText = obj?.text_response ?? '好的，我们继续。';
+        const questions = normalizeQuestions(obj?.form);
+        setMessages((prev) => {
+          const withoutTyping = prev.filter((m) => !m.typing);
+          return [...withoutTyping, { role: 'bot', text: botText, questions }];
+        });
+        setStatus({ type: 'success', message: '对话已更新，可继续补充或进入编辑。' });
+        setLastCommittedAnswers(answersSnapshot);
+        setBoardDirtyMap({});
+      } catch (error) {
+        let message = '连接服务器失败，请检查后端服务。';
+        if (axios.isAxiosError(error) && error.response) {
+          message = error.response.data?.error || error.response.data?.message || message;
+        }
+        setMessages((prev) => {
+          const withoutTyping = prev.filter((m) => !m.typing);
+          return [...withoutTyping, { role: 'bot', text: message }];
+        });
+        setStatus({ type: 'error', message });
+      } finally {
+        sendingRef.current = false;
+        setIsSending(false);
+        const next = pendingChatQueueRef.current.shift();
+        if (next) {
+          setTimeout(() => {
+            void sendChatMessage(next.text, { forceForm: next.forceForm });
+          }, 0);
+        }
+        queueMicrotask(scrollToBottom);
+      }
+    },
+    [scrollToBottom],
+  );
+
+  const setAnswerForQuestion = useCallback(
+    (
+      question: QuestionItem,
+      nextValue: AnswerValue | undefined,
+      source: 'chat' | 'board',
+      skipped = false,
+      triggerFollowup = true,
+    ) => {
+      const normalizedValue = normalizeAnswerValue(nextValue);
+      const nextState: AnswerState = {
+        value: normalizedValue,
+        skipped,
+        updatedAt: Date.now(),
+      };
+      setAnswers((prev) => ({ ...prev, [question.id]: nextState }));
+      answersRef.current = { ...answersRef.current, [question.id]: nextState };
+
+      if (source === 'board') {
+        setBoardDirtyMap((prev) => {
+          const next = { ...prev };
+          const committed = lastCommittedAnswers[question.id];
+          if (isAnswerEqual(nextState, committed)) {
+            delete next[question.id];
+          } else {
+            next[question.id] = true;
+          }
+          return next;
+        });
+      }
+
+      if (source === 'chat' && triggerFollowup) {
+        const label = formatAnswerLabel(nextState);
+        if (label) {
+          void sendChatMessage(`已确认：${question.title} = ${label}`, { forceForm: true });
+        }
+      }
+    },
+    [lastCommittedAnswers, sendChatMessage],
+  );
+
+  const handleOptionSelect = useCallback(
+    (question: QuestionItem, option: string, source: 'chat' | 'board') => {
+      const current = answers[question.id]?.value;
+      if (question.type === 'multi') {
+        const currentList = toAnswerList(current);
+        const nextList = currentList.includes(option)
+          ? currentList.filter((v) => v !== option)
+          : [...currentList, option];
+        const shouldTrigger = source !== 'chat';
+        setAnswerForQuestion(
+          question,
+          nextList.length ? nextList : undefined,
+          source,
+          false,
+          shouldTrigger,
+        );
+        return;
+      }
+      setAnswerForQuestion(question, option, source, false);
+    },
+    [answers, setAnswerForQuestion],
+  );
+
+  const handleSkipQuestion = useCallback(
+    (question: QuestionItem, source: 'chat' | 'board') => {
+      setAnswerForQuestion(question, undefined, source, true);
+    },
+    [setAnswerForQuestion],
+  );
+
+  const handleTextSubmit = useCallback(
+    (question: QuestionItem, source: 'chat' | 'board') => {
+      const draft = (textDrafts[question.id] ?? '').trim();
+      if (!draft) return;
+      setAnswerForQuestion(question, draft, source, false);
+      setTextDrafts((prev) => ({ ...prev, [question.id]: '' }));
+    },
+    [setAnswerForQuestion, textDrafts],
+  );
 
   const handleSend = useCallback(async () => {
     const value = input.trim();
     if (!value || isSending) return;
-    setIsSending(true);
-    setStatus({ type: 'loading', message: '正在生成对话回复...' });
     setInput('');
-    const nextMessages = [...messages, { role: 'user' as const, text: value }];
-    setMessages([...nextMessages, { role: 'bot', text: 'Agent 输入中...', typing: true }]);
-    queueMicrotask(scrollToBottom);
+    await sendChatMessage(value);
+  }, [input, isSending, sendChatMessage]);
 
-    try {
-      const res = await api.post('/chat', {
-        messages: nextMessages.map((m) => ({
-          role: m.role === 'bot' ? 'assistant' : 'user',
-          content: m.text,
-        })),
-        selected_options: selectedOptions,
-      });
-      const obj = res.data?.json_object ?? res.data;
-      const botText = obj?.text_response ?? '好的，我们继续。';
-      const form = normalizeForm(obj?.form);
-      setMessages((prev) => {
-        const withoutTyping = prev.filter((m) => !m.typing);
-        return [...withoutTyping, { role: 'bot', text: botText, form }];
-      });
-      setStatus({ type: 'success', message: '对话已更新，可继续补充或进入编辑。' });
-    } catch (error) {
-      let message = '连接服务器失败，请检查后端服务。';
-      if (axios.isAxiosError(error) && error.response) {
-        message = error.response.data?.error || error.response.data?.message || message;
-      }
-      setMessages((prev) => {
-        const withoutTyping = prev.filter((m) => !m.typing);
-        return [...withoutTyping, { role: 'bot', text: message }];
-      });
-      setStatus({ type: 'error', message });
-    } finally {
-      setIsSending(false);
-      queueMicrotask(scrollToBottom);
-    }
-  }, [input, isSending, messages, scrollToBottom, selectedOptions]);
+  const boardDirtyIds = useMemo(() => Object.keys(boardDirtyMap), [boardDirtyMap]);
+  const hasBoardChanges = boardDirtyIds.length > 0;
+
+  const handleApplyBoardUpdates = useCallback(async () => {
+    if (!hasBoardChanges || isSending) return;
+    const changes = boardDirtyIds
+      .map((id) => {
+        const question = questionContext.map.get(id) ?? {
+          id,
+          title: id,
+          type: 'text' as QuestionType,
+        };
+        const nextState = answers[id];
+        const label = formatAnswerLabel(nextState);
+        return { title: question.title, label };
+      })
+      .filter((item) => item.label);
+    if (!changes.length) return;
+    const summary = changes.map((item) => `将「${item.title}」修改为「${item.label}」`).join('；');
+    await sendChatMessage(summary, { forceForm: true });
+  }, [answers, boardDirtyIds, hasBoardChanges, isSending, questionContext.map, sendChatMessage]);
+
+  const toggleEditing = useCallback((questionId: string) => {
+    setEditingMap((prev) => ({ ...prev, [questionId]: !prev[questionId] }));
+  }, []);
 
   const handleGenerateEdit = useCallback(async () => {
-    if (!isFormComplete || isSending) return;
+    if (isSending) return;
     const initialPrompt = messages.find((m) => m.role === 'user')?.text ?? '';
     setStatus({ type: 'loading', message: '正在生成编辑界面...' });
     setIsWorking(true);
@@ -216,7 +407,7 @@ const SceneFlowPage: React.FC = () => {
     } finally {
       setIsWorking(false);
     }
-  }, [chatHistory, isFormComplete, isSending, messages, selectedOptions]);
+  }, [chatHistory, isSending, messages, selectedOptions]);
 
   const handleStateChange = useCallback((componentId: string, value: any) => {
     setUiState((prev) => ({ ...prev, [componentId]: value }));
@@ -486,6 +677,148 @@ const SceneFlowPage: React.FC = () => {
     navigate('/canvas');
   }, [navigate, previewItems.length]);
 
+  const handleConfirmMultiQuestion = useCallback(
+    (question: QuestionItem) => {
+      const current = answersRef.current[question.id];
+      const label = formatAnswerLabel(current);
+      if (!label) return;
+      setAnswerForQuestion(question, current?.value, 'chat', Boolean(current?.skipped), true);
+    },
+    [setAnswerForQuestion],
+  );
+
+  const pendingCount = pendingQuestions.length;
+  const confirmedCount = confirmedQuestions.length;
+
+  const renderQuestionControls = (question: QuestionItem, source: 'chat' | 'board') => {
+    const answerState = answers[question.id];
+    const selectedValues = toAnswerList(answerState?.value);
+    const allowSkip = question.allowSkip !== false;
+    const isSkipped = Boolean(answerState?.skipped);
+    const isDisabled = isSending;
+
+    if (question.type === 'text') {
+      const draftValue =
+        textDrafts[question.id] ??
+        (typeof answerState?.value === 'string' ? answerState.value : '');
+      return (
+        <Stack spacing={1}>
+          <TextField
+            value={draftValue}
+            onChange={(e) =>
+              setTextDrafts((prev) => ({ ...prev, [question.id]: e.target.value }))
+            }
+            size="small"
+            placeholder={question.placeholder || '请输入补充描述'}
+            disabled={isDisabled}
+            multiline
+            minRows={2}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                handleTextSubmit(question, source);
+              }
+            }}
+          />
+          <Stack direction="row" spacing={1}>
+            <Button
+              size="small"
+              variant="contained"
+              onClick={() => handleTextSubmit(question, source)}
+              disabled={isDisabled || !(textDrafts[question.id] ?? '').trim()}
+            >
+              确认
+            </Button>
+            {allowSkip ? (
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => handleSkipQuestion(question, source)}
+                disabled={isDisabled}
+              >
+                暂不确定
+              </Button>
+            ) : null}
+          </Stack>
+        </Stack>
+      );
+    }
+
+    if (question.type === 'multi' && source === 'chat') {
+      return (
+        <Stack spacing={1}>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {(question.options ?? []).map((opt) => {
+              const selected = selectedValues.includes(opt);
+              return (
+                <Chip
+                  key={`${question.id}-${opt}`}
+                  label={opt}
+                  size="small"
+                  clickable
+                  color={selected ? 'primary' : 'default'}
+                  variant={selected ? 'filled' : 'outlined'}
+                  onClick={() => handleOptionSelect(question, opt, source)}
+                  disabled={isDisabled}
+                />
+              );
+            })}
+            {allowSkip ? (
+              <Chip
+                label="暂不确定"
+                size="small"
+                color={isSkipped ? 'primary' : 'default'}
+                variant={isSkipped ? 'filled' : 'outlined'}
+                onClick={() => handleSkipQuestion(question, source)}
+                disabled={isDisabled}
+              />
+            ) : null}
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            <Button
+              size="small"
+              variant="contained"
+              onClick={() => handleConfirmMultiQuestion(question)}
+              disabled={isDisabled || selectedValues.length === 0}
+            >
+              确认
+            </Button>
+          </Stack>
+        </Stack>
+      );
+    }
+
+    return (
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        {(question.options ?? []).map((opt) => {
+          const selected = selectedValues.includes(opt);
+          return (
+            <Chip
+              key={`${question.id}-${opt}`}
+              label={opt}
+              size="small"
+              clickable
+              color={selected ? 'primary' : 'default'}
+              variant={selected ? 'filled' : 'outlined'}
+              onClick={() => handleOptionSelect(question, opt, source)}
+              disabled={isDisabled}
+            />
+          );
+        })}
+        {allowSkip ? (
+          <Chip
+            label="暂不确定"
+            size="small"
+            color={isSkipped ? 'primary' : 'default'}
+            variant={isSkipped ? 'filled' : 'outlined'}
+            onClick={() => handleSkipQuestion(question, source)}
+            disabled={isDisabled}
+          />
+        ) : null}
+      </Stack>
+    );
+  };
+
   const previewData = useMemo(() => {
     const bgSlot = mediaSlots.find((slot) => slot.layerType === 'background');
     const subjects = mediaSlots.filter((slot) => slot.layerType !== 'background');
@@ -535,11 +868,7 @@ const SceneFlowPage: React.FC = () => {
     if (!layoutConfig) {
       return (
         <Stack direction="row" spacing={1} alignItems="center">
-          <Button
-            variant="contained"
-            onClick={handleGenerateEdit}
-            disabled={isSending || !isFormComplete}
-          >
+          <Button variant="contained" onClick={handleGenerateEdit} disabled={isSending}>
             生成编辑界面
           </Button>
           <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={isSending}>
@@ -574,7 +903,6 @@ const SceneFlowPage: React.FC = () => {
     handleGenerateEdit,
     handleGeneratePreviewToCanvas,
     handleGoCanvas,
-    isFormComplete,
     isSending,
     layoutConfig,
     previewItems.length,
@@ -640,7 +968,13 @@ const SceneFlowPage: React.FC = () => {
                     </Typography>
                   </Box>
                   <Chip
-                    label={hasForm ? (isFormComplete ? '可进入编辑' : '待完成') : '待生成'}
+                    label={
+                      hasQuestions
+                        ? pendingCount > 0
+                          ? `待澄清 ${pendingCount}`
+                          : '可进入编辑'
+                        : '等待描述'
+                    }
                     size="small"
                   />
                 </Stack>
@@ -679,6 +1013,26 @@ const SceneFlowPage: React.FC = () => {
                             {msg.text}
                             {msg.typing ? <LoadingDots /> : null}
                           </Typography>
+                          {msg.role === 'bot' && msg.questions?.length ? (
+                            <Stack spacing={1} sx={{ mt: 1 }}>
+                              {msg.questions.map((question) => (
+                                <Box
+                                  key={question.id}
+                                  sx={{
+                                    p: 1,
+                                    borderRadius: 1.5,
+                                    border: '1px solid rgba(15, 23, 42, 0.12)',
+                                    backgroundColor: '#fff',
+                                  }}
+                                >
+                                  <Typography variant="caption" sx={{ display: 'block', mb: 0.5 }}>
+                                    {question.title}
+                                  </Typography>
+                                  {renderQuestionControls(question, 'chat')}
+                                </Box>
+                              ))}
+                            </Stack>
+                          ) : null}
                         </Box>
                       </Box>
                     ))}
@@ -715,53 +1069,90 @@ const SceneFlowPage: React.FC = () => {
               >
                 <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
                   <Box>
-                    <Typography variant="h6">表单卡片</Typography>
+                    <Typography variant="h6">意图板</Typography>
                     <Typography variant="caption" color="text.secondary">
-                      选择题结果决定编辑项
+                      对话中的意图将在此汇总
                     </Typography>
                   </Box>
-                  <Chip
-                    label={hasForm ? (isFormComplete ? '已完成' : '待选择') : '待生成'}
-                    size="small"
-                  />
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    {hasBoardChanges ? (
+                      <Button size="small" variant="contained" onClick={handleApplyBoardUpdates} disabled={isSending}>
+                        更新{boardDirtyIds.length ? `（${boardDirtyIds.length}）` : ''}
+                      </Button>
+                    ) : null}
+                    <Chip
+                      label={pendingCount > 0 ? `待确认 ${pendingCount}` : '已同步'}
+                      size="small"
+                    />
+                  </Stack>
                 </Stack>
 
-                {latestForm?.length ? (
-                  <Stack spacing={1.5}>
-                    {latestForm.map((section, sectionIndex) => (
-                      <Box key={`${section.title}-${sectionIndex}`}>
-                        <Typography variant="caption" sx={{ opacity: 0.9, display: 'block' }}>
-                          {section.title}
-                        </Typography>
-                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
-                          {(Array.isArray(section.options) ? section.options : []).map((opt) => {
-                            const selected = selectedOptions[section.title]?.includes(opt);
-                            return (
-                              <Chip
-                                key={opt}
-                                label={opt}
-                                size="small"
-                                clickable
-                                color={selected ? 'primary' : 'default'}
-                                variant={selected ? 'filled' : 'outlined'}
-                                onClick={() => toggleOption(section.title, opt)}
-                              />
-                            );
-                          })}
-                        </Stack>
-                      </Box>
-                    ))}
-                    {!isFormComplete ? (
-                      <Typography variant="caption" color="error">
-                        请为每项至少选择一个选项，才能进入编辑界面。
+                <Stack spacing={2}>
+                  <Box>
+                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                      <Typography variant="subtitle2">待确认</Typography>
+                      <Chip label={pendingCount} size="small" />
+                    </Stack>
+                    {pendingQuestions.length ? (
+                      <Stack spacing={1.5} sx={{ mt: 1 }}>
+                        {pendingQuestions.map((question) => (
+                          <Box key={question.id}>
+                            <Typography variant="caption" sx={{ opacity: 0.9, display: 'block' }}>
+                              {question.title}
+                            </Typography>
+                            {renderQuestionControls(question, 'board')}
+                          </Box>
+                        ))}
+                      </Stack>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                        暂无待确认问题。
                       </Typography>
-                    ) : null}
-                  </Stack>
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    暂无表单，请先在聊天中描述需求。
-                  </Typography>
-                )}
+                    )}
+                  </Box>
+
+                  <Box>
+                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                      <Typography variant="subtitle2">已确认</Typography>
+                      <Chip label={confirmedCount} size="small" />
+                    </Stack>
+                    {confirmedQuestions.length ? (
+                      <Stack spacing={1.2} sx={{ mt: 1 }}>
+                        {confirmedQuestions.map((question) => {
+                          const answerState = answers[question.id];
+                          const answerLabel = formatAnswerLabel(answerState);
+                          const isEditing = Boolean(editingMap[question.id]);
+                          return (
+                            <Box
+                              key={question.id}
+                              sx={{
+                                p: 1,
+                                borderRadius: 1.5,
+                                border: '1px solid rgba(15, 23, 42, 0.1)',
+                                backgroundColor: 'rgba(15, 23, 42, 0.02)',
+                              }}
+                            >
+                              <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                                <Typography variant="body2">{question.title}</Typography>
+                                <Button size="small" variant="text" onClick={() => toggleEditing(question.id)}>
+                                  {isEditing ? '收起' : '改'}
+                                </Button>
+                              </Stack>
+                              <Typography variant="caption" color="text.secondary">
+                                {answerLabel || '暂未填写'}
+                              </Typography>
+                              {isEditing ? <Box sx={{ mt: 1 }}>{renderQuestionControls(question, 'board')}</Box> : null}
+                            </Box>
+                          );
+                        })}
+                      </Stack>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                        还没有已确认的选项。
+                      </Typography>
+                    )}
+                  </Box>
+                </Stack>
               </CardContent>
             </Card>
           </div>
@@ -1012,7 +1403,7 @@ const SceneFlowPage: React.FC = () => {
               </Alert>
             ) : (
               <Typography variant="body2" color="text.secondary">
-                选择完成后即可进入编辑流程，随时可回退调整。
+                可随时进入编辑流程；对话可继续无限追问细化需求。
               </Typography>
             )}
           </Box>
@@ -1062,34 +1453,167 @@ const LoadingDots: React.FC = () => {
   );
 };
 
-function normalizeForm(input: unknown): FormSection[] {
+function normalizeQuestions(input: unknown): QuestionItem[] {
   if (!Array.isArray(input)) {
     return [];
   }
-  const sections: FormSection[] = [];
+  const questions: QuestionItem[] = [];
   input.forEach((raw, index) => {
     if (!raw || typeof raw !== 'object') {
       return;
     }
-    const maybeTitle = (raw as any).title;
-    const title = typeof maybeTitle === 'string' && maybeTitle.trim() ? maybeTitle.trim() : `问题 ${index + 1}`;
-    const maybeOptions = (raw as any).options;
-    let options: string[] = [];
-    if (Array.isArray(maybeOptions)) {
-      options = maybeOptions.map((v) => String(v)).map((v) => v.trim()).filter(Boolean);
-    } else if (typeof maybeOptions === 'string') {
-      options = maybeOptions
-        .split(/[,，、;\n]+/g)
-        .map((v) => v.trim())
-        .filter(Boolean);
-    }
-    options = Array.from(new Set(options)).slice(0, 6);
-    if (options.length === 0) {
+    const rawRecord = raw as Record<string, any>;
+    const rawTitle = rawRecord.title;
+    const title = typeof rawTitle === 'string' && rawTitle.trim() ? rawTitle.trim() : `问题 ${index + 1}`;
+    const rawId = rawRecord.id ?? rawRecord.key ?? rawRecord.question_id;
+    const questionId = normalizeQuestionId(rawId, title, index);
+    const rawType = String(rawRecord.type ?? rawRecord.question_type ?? '').trim().toLowerCase();
+    const multiple = rawRecord.multiple === true || rawType === 'multi' || rawType === 'multiple';
+    const isText =
+      rawType === 'text' ||
+      rawType === 'text-input' ||
+      rawType === 'input' ||
+      rawType === 'free-text';
+    const type: QuestionType = isText ? 'text' : multiple ? 'multi' : 'single';
+    const allowSkip =
+      typeof rawRecord.allow_skip === 'boolean'
+        ? rawRecord.allow_skip
+        : typeof rawRecord.allowSkip === 'boolean'
+          ? rawRecord.allowSkip
+          : true;
+    const priorityRaw = Number(rawRecord.priority);
+    const priority = Number.isFinite(priorityRaw)
+      ? Math.min(5, Math.max(1, Math.round(priorityRaw)))
+      : 3;
+    const placeholder =
+      typeof rawRecord.placeholder === 'string' && rawRecord.placeholder.trim()
+        ? rawRecord.placeholder.trim()
+        : typeof rawRecord.helperText === 'string'
+          ? rawRecord.helperText.trim()
+          : undefined;
+
+    const options = parseOptions(rawRecord.options);
+    if (type !== 'text' && options.length === 0) {
       return;
     }
-    sections.push({ title, options });
+    questions.push({
+      id: questionId,
+      title,
+      type,
+      options: type === 'text' ? undefined : options,
+      priority,
+      allowSkip,
+      placeholder,
+    });
   });
-  return sections;
+  return questions;
+}
+
+function parseOptions(value: unknown): string[] {
+  let options: string[] = [];
+  if (Array.isArray(value)) {
+    options = value.map((v) => String(v)).map((v) => v.trim()).filter(Boolean);
+  } else if (typeof value === 'string') {
+    options = value
+      .split(/[,，、;\n]+/g)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return Array.from(new Set(options)).slice(0, 8);
+}
+
+function normalizeQuestionId(rawId: unknown, title: string, index: number): string {
+  const base = String(rawId ?? title ?? `question-${index + 1}`).trim().toLowerCase();
+  const slug = base
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+  if (slug) return slug;
+  const hash = Math.abs(hashString(base || title)).toString(36).slice(0, 6);
+  return `question-${index + 1}-${hash || 'id'}`;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
+function normalizeAnswerValue(value?: AnswerValue): AnswerValue | undefined {
+  if (Array.isArray(value)) {
+    const next = value.map((v) => String(v).trim()).filter(Boolean);
+    return next.length ? Array.from(new Set(next)) : undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  return undefined;
+}
+
+function toAnswerList(value?: AnswerValue): string[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return value ? [value] : [];
+  return [];
+}
+
+function isAnswerResolved(state?: AnswerState): boolean {
+  if (!state) return false;
+  if (state.skipped) return true;
+  const value = normalizeAnswerValue(state.value);
+  if (Array.isArray(value)) return value.length > 0;
+  return typeof value === 'string' && value.length > 0;
+}
+
+function formatAnswerLabel(state?: AnswerState): string {
+  if (!state) return '';
+  if (state.skipped) return '暂不确定';
+  const value = normalizeAnswerValue(state.value);
+  if (Array.isArray(value)) {
+    return value.join(' / ');
+  }
+  if (typeof value === 'string') return value;
+  return '';
+}
+
+function isAnswerEqual(a?: AnswerState, b?: AnswerState): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (Boolean(a.skipped) !== Boolean(b.skipped)) return false;
+  const listA = toAnswerList(normalizeAnswerValue(a.value));
+  const listB = toAnswerList(normalizeAnswerValue(b.value));
+  if (listA.length !== listB.length) return false;
+  return listA.every((value, idx) => value === listB[idx]);
+}
+
+function cloneAnswerState(state: Record<string, AnswerState>): Record<string, AnswerState> {
+  const next: Record<string, AnswerState> = {};
+  Object.entries(state).forEach(([key, value]) => {
+    const cloned: AnswerState = { ...value };
+    if (Array.isArray(value.value)) {
+      cloned.value = [...value.value];
+    }
+    next[key] = cloned;
+  });
+  return next;
+}
+
+function buildSelectedOptionsPayload(
+  questions: QuestionItem[],
+  state: Record<string, AnswerState>,
+): Record<string, string[]> {
+  const payload: Record<string, string[]> = {};
+  questions.forEach((question) => {
+    const answerState = state[question.id];
+    if (!answerState || answerState.skipped) return;
+    const values = toAnswerList(normalizeAnswerValue(answerState.value));
+    if (!values.length) return;
+    payload[question.title] = values;
+  });
+  return payload;
 }
 
 type LayoutItemSpec = { i: string; w: number; h: number };

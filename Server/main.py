@@ -7,6 +7,7 @@ import shutil
 import os
 import json
 import re
+import hashlib
 from datetime import datetime
 import io
 import base64
@@ -252,6 +253,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     selected_options: Optional[dict] = None
+    force_form: Optional[bool] = None
 
 
 @app.post("/chat")
@@ -260,7 +262,7 @@ def chat(req: ChatRequest):
     if not req.messages:
         return JSONResponse(status_code=400, content={"error": "messages 不能为空"})
     selected_options = req.selected_options or {}
-    result = generate_llm_chat(req.messages, selected_options=selected_options)
+    result = generate_llm_chat(req.messages, selected_options=selected_options, force_form=bool(req.force_form))
 
     # Ensure the very first turn has a form (LiteDraw expectation).
     user_messages = [m for m in req.messages if (m.role or "").lower() == "user"]
@@ -577,6 +579,17 @@ def _coerce_palette_options(value) -> List[dict]:
     return options[:10]
 
 
+def _normalize_question_id(raw_id: Optional[str], title: str, index: int) -> str:
+    base = (raw_id or title or f"question-{index + 1}").strip().lower()
+    slug = re.sub(r"[^a-z0-9_-]+", "-", base)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-_")
+    if slug:
+        return slug
+    seed = raw_id or title or f"question-{index + 1}"
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()[:6]
+    return f"question-{index + 1}-{digest}"
+
+
 def _normalize_form_sections(form_value) -> List[dict]:
     if not isinstance(form_value, list):
         return []
@@ -586,12 +599,45 @@ def _normalize_form_sections(form_value) -> List[dict]:
             continue
         title = item.get("title")
         title = title.strip() if isinstance(title, str) and title.strip() else f"问题 {idx + 1}"
+        raw_id = item.get("id") or item.get("key") or item.get("question_id")
+        raw_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else None
+        qid = _normalize_question_id(raw_id, title, idx)
+        raw_type = str(item.get("type") or item.get("question_type") or "").strip().lower()
+        multiple = _coerce_bool(item.get("multiple"), False) or raw_type in ("multi", "multiple", "multi-select")
+        is_text = raw_type in ("text", "text-input", "input", "free-text")
+        qtype = "text" if is_text else "multi" if multiple else "single"
         options = _coerce_options(item.get("options"))
-        options = list(dict.fromkeys([opt for opt in options if opt]))[:6]
-        if len(options) < 1:
+        options = list(dict.fromkeys([opt for opt in options if opt]))[:8]
+        allow_skip = _coerce_bool(item.get("allow_skip"), True)
+        if "allow_skip" not in item:
+            allow_skip = _coerce_bool(item.get("allowSkip"), allow_skip)
+        priority = _coerce_number(item.get("priority"))
+        if priority is not None:
+            priority = max(1, min(5, int(round(priority))))
+        else:
+            priority = 3
+        placeholder = item.get("placeholder")
+        if not isinstance(placeholder, str) or not placeholder.strip():
+            placeholder = item.get("helperText")
+        if isinstance(placeholder, str):
+            placeholder = placeholder.strip()
+        else:
+            placeholder = None
+
+        if qtype != "text" and len(options) < 1:
             continue
-        normalized.append({"title": title, "options": options})
-    return normalized[:4]
+        payload = {
+            "id": qid,
+            "title": title,
+            "type": qtype,
+            "options": options if qtype != "text" else [],
+            "priority": priority,
+            "allow_skip": allow_skip,
+        }
+        if placeholder:
+            payload["placeholder"] = placeholder
+        normalized.append(payload)
+    return normalized[:6]
 
 
 def _normalize_llm_payload(obj: dict, default_text: str) -> dict:
@@ -609,9 +655,30 @@ def generate_llm_form(user_prompt: str) -> dict:
     fallback = {
         "text_response": "好的！为了更接近你想要的效果，请先选几项偏好：",
         "form": [
-            {"title": "画幅比例", "options": ["3:4", "1:1", "16:9"]},
-            {"title": "风格方向", "options": ["摄影", "插画", "3D 渲染", "平面海报"]},
-            {"title": "氛围", "options": ["明亮清爽", "暗黑电影感", "梦幻柔光", "复古胶片"]},
+            {
+                "id": "aspect_ratio",
+                "title": "画幅比例",
+                "type": "single",
+                "options": ["3:4", "1:1", "16:9", "9:16"],
+                "priority": 1,
+                "allow_skip": True,
+            },
+            {
+                "id": "style",
+                "title": "风格方向",
+                "type": "single",
+                "options": ["摄影", "插画", "3D 渲染", "平面海报"],
+                "priority": 2,
+                "allow_skip": True,
+            },
+            {
+                "id": "mood",
+                "title": "氛围",
+                "type": "multi",
+                "options": ["明亮清爽", "暗黑电影感", "梦幻柔光", "复古胶片"],
+                "priority": 3,
+                "allow_skip": True,
+            },
         ],
     }
     if not _siliconflow_enabled():
@@ -621,7 +688,11 @@ def generate_llm_form(user_prompt: str) -> dict:
     system = (
         "你是一个文生图应用的对话助手。任务：根据用户的初始想法生成 2-4 个选择题表单，用于澄清需求。\n"
         "输出必须是单个 JSON 对象，且只包含这些字段：text_response(string), form(array).\n"
-        "form 中每一项为 {title: string, options: string[]}，options 2-4 个，高层抽象，不要数值参数。\n"
+        "form 中每一项为 {id,title,type,options,priority,allow_skip,placeholder}：\n"
+        "- id 是稳定英文 key（如 aspect_ratio/style/mood/subject_count）；\n"
+        "- type 只能是 single/multi/text；single/multi 必须给 options；text 可给 placeholder；\n"
+        "- options 2-4 个，高层抽象，不要数值参数；\n"
+        "- priority 为 1-5，数字越小越优先；allow_skip 为布尔值。\n"
         "全部用中文。"
     )
     messages = [
@@ -644,7 +715,7 @@ def generate_llm_form(user_prompt: str) -> dict:
     return fallback
 
 
-def generate_llm_chat(messages: List[ChatMessage], selected_options: dict) -> dict:
+def generate_llm_chat(messages: List[ChatMessage], selected_options: dict, force_form: bool = False) -> dict:
     """
     Multi-turn assistant. If a form has not been generated yet, generate it.
     Otherwise respond and optionally return a refined form (can be empty).
@@ -662,8 +733,14 @@ def generate_llm_chat(messages: List[ChatMessage], selected_options: dict) -> di
         "1) 如果用户还没完成需求澄清，请给出简短追问，并可返回 form(2-4题)；\n"
         "2) 如果用户已给出足够信息，可只返回 text_response，form 可以为空数组。\n"
         "输出必须是单个 JSON 对象，字段：text_response(string), form(array)。form 允许为空数组。\n"
+        "form 每项为 {id,title,type,options,priority,allow_skip,placeholder}，规则同首轮：\n"
+        "- id 是稳定英文 key；type 只能是 single/multi/text；\n"
+        "- single/multi 必须有 options；text 可给 placeholder；\n"
+        "- priority 1-5，数值越小越优先；allow_skip 为布尔值。\n"
         "全部用中文。"
     )
+    if force_form:
+        system += "\n当前需要继续追问：必须返回至少 1 个 form 问题，form 不能为空。"
     sf_messages = [{"role": "system", "content": system}]
     for m in messages[-20:]:
         role = "assistant" if m.role in ("assistant", "bot") else "user"
@@ -674,8 +751,31 @@ def generate_llm_chat(messages: List[ChatMessage], selected_options: dict) -> di
     try:
         content = _call_siliconflow_chat(sf_messages)
         obj = _safe_parse_json_object(content)
-        return _normalize_llm_payload(obj, default_text=fallback["text_response"])
+        normalized = _normalize_llm_payload(obj, default_text=fallback["text_response"])
+        if force_form and not (normalized.get("form") or []):
+            normalized["form"] = [
+                {
+                    "id": "followup-detail",
+                    "title": "还有哪些细节需要补充？",
+                    "type": "text",
+                    "placeholder": "例如布局位置、风格细节、光照、材质等",
+                    "priority": 1,
+                    "allow_skip": True,
+                }
+            ]
+        return normalized
     except Exception:
+        if force_form:
+            fallback["form"] = [
+                {
+                    "id": "followup-detail",
+                    "title": "还有哪些细节需要补充？",
+                    "type": "text",
+                    "placeholder": "例如布局位置、风格细节、光照、材质等",
+                    "priority": 1,
+                    "allow_skip": True,
+                }
+            ]
         return fallback
     return fallback
 
