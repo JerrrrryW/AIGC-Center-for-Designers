@@ -70,6 +70,7 @@ const GRID_BREAKPOINTS = { lg: 1200, md: 900, sm: 600, xs: 0 };
 const GRID_COLS = { lg: 12, md: 8, sm: 6, xs: 4 };
 const GRID_ROW_HEIGHT = 32;
 const GRID_MARGIN: [number, number] = [16, 16];
+const GRID_CONTAINER_PADDING: [number, number] = [8, 8];
 
 const SceneFlowPage: React.FC = () => {
   const navigate = useNavigate();
@@ -87,6 +88,7 @@ const SceneFlowPage: React.FC = () => {
   const [textDrafts, setTextDrafts] = useState<Record<string, string>>({});
   const [isSending, setIsSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const gridContainerRef = useRef<HTMLDivElement | null>(null);
   const sendingRef = useRef(false);
   const pendingChatQueueRef = useRef<Array<{ text: string; forceForm?: boolean }>>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -103,6 +105,7 @@ const SceneFlowPage: React.FC = () => {
   const [quickImage, setQuickImage] = useState<string | null>(null);
   const [quickStatus, setQuickStatus] = useState<StatusState>({ type: 'idle', message: '' });
   const [quickLoading, setQuickLoading] = useState(false);
+  const [step1Rows, setStep1Rows] = useState(0);
 
   const questionContext = useMemo(() => {
     const map = new Map<string, QuestionItem>();
@@ -181,6 +184,24 @@ const SceneFlowPage: React.FC = () => {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    if (layoutConfig) return;
+    const el = gridContainerRef.current;
+    if (!el) return;
+    const updateRows = () => {
+      const height = el.clientHeight;
+      if (!height) return;
+      const adjustedHeight = Math.max(0, height - GRID_CONTAINER_PADDING[1] * 2);
+      const rowUnit = GRID_ROW_HEIGHT + GRID_MARGIN[1];
+      const rows = Math.max(1, Math.floor((adjustedHeight + GRID_MARGIN[1]) / rowUnit));
+      setStep1Rows((prev) => (prev === rows ? prev : rows));
+    };
+    updateRows();
+    const observer = new ResizeObserver(updateRows);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [layoutConfig]);
 
   useEffect(() => {
     answersRef.current = answers;
@@ -835,10 +856,23 @@ const SceneFlowPage: React.FC = () => {
     };
     const buildForCols = (cols: number) => {
       const items: LayoutItemSpec[] = [];
-      const majorSpan = Math.min(2, layoutColumns);
-      items.push({ i: 'chat', w: spanToWidth(cols, majorSpan), h: 12 });
-      items.push({ i: 'form', w: spanToWidth(cols, 1), h: 7 });
-      if (layoutConfig) {
+      const isSingleColumn = cols <= GRID_COLS.sm;
+      const step1Height = Math.max(10, step1Rows || 12);
+
+      if (!layoutConfig) {
+        if (isSingleColumn) {
+          items.push({ i: 'chat', w: cols, h: step1Height });
+          items.push({ i: 'form', w: cols, h: step1Height });
+        } else {
+          const chatWidth = Math.max(1, Math.round((cols * 2) / 3));
+          const formWidth = Math.max(1, cols - chatWidth);
+          items.push({ i: 'chat', w: chatWidth, h: step1Height });
+          items.push({ i: 'form', w: formWidth, h: step1Height });
+        }
+      } else {
+        const majorSpan = Math.min(2, layoutColumns);
+        items.push({ i: 'chat', w: spanToWidth(cols, majorSpan), h: 12 });
+        items.push({ i: 'form', w: spanToWidth(cols, 1), h: 7 });
         items.push({ i: 'summary', w: spanToWidth(cols, majorSpan), h: 4 });
         sections.forEach((section) => {
           const span = Math.max(1, Math.floor(coerceNumber(section.layout?.span) ?? 1));
@@ -850,9 +884,17 @@ const SceneFlowPage: React.FC = () => {
         });
         items.push({ i: 'preview', w: spanToWidth(cols, majorSpan), h: 10 });
       }
+
       if (showQuick) {
-        items.push({ i: 'quick', w: spanToWidth(cols, 1), h: 7 });
+        const quickWidth =
+          !layoutConfig && isSingleColumn
+            ? cols
+            : !layoutConfig
+              ? Math.max(1, cols - Math.max(1, Math.round((cols * 2) / 3)))
+              : spanToWidth(cols, 1);
+        items.push({ i: 'quick', w: quickWidth, h: 7 });
       }
+
       return packGridItems(items, cols);
     };
     return {
@@ -936,7 +978,7 @@ const SceneFlowPage: React.FC = () => {
         ))}
       </Stepper>
 
-      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', pb: 12, pr: 1 }}>
+      <Box ref={gridContainerRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto', pb: 12, pr: 1 }}>
         <ResponsiveGridLayout
           className="scene-dashboard-grid"
           layouts={layouts}
@@ -944,7 +986,7 @@ const SceneFlowPage: React.FC = () => {
           cols={GRID_COLS}
           rowHeight={GRID_ROW_HEIGHT}
           margin={GRID_MARGIN}
-          containerPadding={[8, 8]}
+          containerPadding={GRID_CONTAINER_PADDING}
           isDraggable={false}
           isResizable={false}
           compactType="vertical"
