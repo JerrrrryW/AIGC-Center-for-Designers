@@ -37,7 +37,9 @@ caption_status = {
 
 BASE_MODEL_DEFAULT = "runwayml/stable-diffusion-v1-5"
 DISABLE_SAFETY_CHECKER = True
-LAYOUT_SCHEMA_VERSION = "1.2"
+LAYOUT_SCHEMA_VERSION = "1.3"
+_COMPONENT_LIBRARY_PATH = os.path.join(os.path.dirname(__file__), "component_library.json")
+_COMPONENT_LIBRARY_CACHE = None
 llm_runtime_config = {
     "api_key": None,
     "base_url": None,
@@ -74,6 +76,39 @@ def _load_torch():
     except Exception as exc:
         _torch_error = exc
     return _torch
+
+
+def _load_component_library() -> dict:
+    global _COMPONENT_LIBRARY_CACHE
+    if _COMPONENT_LIBRARY_CACHE is not None:
+        return _COMPONENT_LIBRARY_CACHE
+    data = {}
+    try:
+        with open(_COMPONENT_LIBRARY_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except Exception:
+        data = {}
+    _COMPONENT_LIBRARY_CACHE = data
+    return data
+
+
+def _component_library_by_type() -> dict:
+    library = _load_component_library()
+    if not isinstance(library, dict):
+        return {}
+    items = library.get("cardTypes")
+    if not isinstance(items, list):
+        return {}
+    mapping = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        card_type = item.get("cardType")
+        if isinstance(card_type, str) and card_type.strip():
+            mapping[card_type.strip()] = item
+    return mapping
 
 
 def _load_diffusers():
@@ -349,7 +384,7 @@ def _resolve_llm_config() -> dict:
     model = (llm_runtime_config.get("model") or "").strip()
     if not model:
         model = os.getenv("SILICONFLOW_MODEL", "").strip()
-    model = model or "Qwen/Qwen2.5-7B-Instruct"
+    model = model or "Qwen/Qwen3-Next-80B-A3B-Instruct"
     temperature = _resolve_llm_temperature()
     return {
         "api_key": api_key,
@@ -525,6 +560,42 @@ def _coerce_options(value) -> List[str]:
         parts = re.split(r"[,，、;\n；]+", value)
         return [p.strip() for p in parts if p.strip()]
     return []
+
+
+def _coerce_component_options(value) -> List[dict]:
+    if isinstance(value, str):
+        items = re.split(r"[,，、;\n；]+", value)
+        return [{"value": item.strip(), "label": item.strip()} for item in items if item.strip()]
+    if not isinstance(value, list):
+        return []
+    options = []
+    for raw in value:
+        if isinstance(raw, dict):
+            raw_value = raw.get("value") or raw.get("label")
+            if not raw_value:
+                continue
+            entry = {"value": str(raw_value).strip()}
+            label = raw.get("label")
+            if isinstance(label, str) and label.strip():
+                entry["label"] = label.strip()
+            description = raw.get("description")
+            if isinstance(description, str) and description.strip():
+                entry["description"] = description.strip()
+            image = raw.get("image")
+            if isinstance(image, str) and image.strip():
+                entry["image"] = image.strip()
+            preview_prompt = raw.get("previewPrompt")
+            if isinstance(preview_prompt, str) and preview_prompt.strip():
+                entry["previewPrompt"] = preview_prompt.strip()
+            color = raw.get("color")
+            if isinstance(color, str) and color.strip():
+                entry["color"] = color.strip()
+            options.append(entry)
+        else:
+            text = str(raw).strip()
+            if text:
+                options.append({"value": text, "label": text})
+    return options
 
 
 def _coerce_number(value) -> Optional[float]:
@@ -931,8 +1002,19 @@ def _merge_options(base: List[str], additions: List[str]) -> List[str]:
 def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selected_options: Optional[dict]) -> dict:
     selected = selected_options or {}
     aspect_ratio = _infer_aspect_ratio(prompt, selected)
-    style_options = ["摄影", "插画", "3D 渲染", "平面海报"]
-    mood_options = ["明亮清爽", "暗黑电影感", "梦幻柔光", "复古胶片"]
+    style_options = [
+        "写实摄影",
+        "电影感",
+        "二次元插画",
+        "3D 渲染",
+        "平面海报",
+        "国风",
+        "赛博朋克",
+        "水彩",
+        "复古胶片",
+        "极简",
+    ]
+    mood_options = ["清新", "梦幻", "史诗", "温暖", "冷峻", "暗黑", "赛博", "复古", "浪漫", "神秘"]
 
     selected_style = _pick_selected_first(selected, ["风格", "风格方向"])
     style_default = selected_style or _infer_style(prompt)
@@ -1001,6 +1083,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
         "sections": [
             {
                 "id": "base",
+                "cardType": "base-info",
                 "title": "场景基础",
                 "description": "命名、比例与核心描述",
                 "components": [
@@ -1029,6 +1112,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             },
             {
                 "id": "style",
+                "cardType": "style-core",
                 "title": "风格与氛围",
                 "description": "更偏向视觉方向的选择",
                 "components": [
@@ -1038,7 +1122,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                         "label": "风格方向",
                         "options": style_options,
                         "default": style_default,
-                        "display": "chips",
+                        "display": "cards",
                     },
                     {
                         "id": "scene-mood",
@@ -1057,6 +1141,8 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                             {"value": "冷色", "label": "冷色", "color": "#5DADE2"},
                             {"value": "高对比", "label": "高对比", "color": "#1F1F1F"},
                             {"value": "粉彩", "label": "粉彩", "color": "#F7C7D9"},
+                            {"value": "复古", "label": "复古", "color": "#C27C4D"},
+                            {"value": "霓虹", "label": "霓虹", "color": "#7C4DFF"},
                         ],
                         "default": "暖色",
                     },
@@ -1064,6 +1150,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             },
             {
                 "id": "prompt",
+                "cardType": "prompt-core",
                 "title": "提示词",
                 "description": "编辑生成核心提示词",
                 "layout": {"span": 2, "tone": "accent"},
@@ -1091,6 +1178,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             },
             {
                 "id": "generation",
+                "cardType": "generation-settings",
                 "title": "生成参数",
                 "description": "基础生成控制项",
                 "components": [
@@ -1126,6 +1214,7 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
             },
             {
                 "id": "materials",
+                "cardType": "materials",
                 "title": "素材准备",
                 "description": "上传或生成素材图层",
                 "layout": {"span": 2, "tone": "soft"},
@@ -1446,24 +1535,27 @@ def _sanitize_components(raw_components, base_prompt: str, style: str, moods: Li
             if default is not None:
                 base["default"] = str(default)
         elif comp_type in ("select", "multi-select", "ratio-select"):
-            options = _coerce_options(comp.get("options"))
+            options = _coerce_component_options(comp.get("options"))
             if not options:
                 continue
-            base["options"] = options[:8]
+            max_options = 12
+            options = options[:max_options]
+            base["options"] = options
             display = comp.get("display")
             if isinstance(display, str) and display.strip():
                 display_value = display.strip().lower()
-                if display_value in {"chips"}:
+                if display_value in {"chips", "cards", "images", "swatches"}:
                     base["display"] = display_value
             default = comp.get("default")
+            option_values = [opt.get("value") for opt in options if isinstance(opt.get("value"), str)]
             if comp_type in ("select", "ratio-select"):
-                if isinstance(default, str) and default in options:
+                if isinstance(default, str) and default in option_values:
                     base["default"] = default
                 else:
-                    base["default"] = options[0]
+                    base["default"] = option_values[0]
             else:
                 if isinstance(default, list):
-                    selected = [str(v).strip() for v in default if str(v).strip() and str(v).strip() in options]
+                    selected = [str(v).strip() for v in default if str(v).strip() and str(v).strip() in option_values]
                     base["default"] = selected
         elif comp_type == "color-palette":
             options = _coerce_palette_options(comp.get("options"))
@@ -1537,15 +1629,30 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
     used_section_ids: set = set()
     used_component_ids: set = set()
     ratio_component_ids: List[str] = []
+    library_by_type = _component_library_by_type()
     for idx, section in enumerate(sections):
         if not isinstance(section, dict):
             continue
         section_id = _ensure_unique_id(section.get("id") or f"section-{idx + 1}", used_section_ids, "section")
+        card_type = section.get("cardType")
+        card_type = card_type.strip() if isinstance(card_type, str) and card_type.strip() else None
+        template = library_by_type.get(card_type) if card_type else None
         title = section.get("title")
         title = title.strip() if isinstance(title, str) and title.strip() else None
         description = section.get("description")
         description = description.strip() if isinstance(description, str) and description.strip() else None
-        components = _sanitize_components(section.get("components"), base_prompt, style_default, mood_defaults, used_ids=used_component_ids)
+        if not title and template:
+            template_title = template.get("title")
+            title = template_title.strip() if isinstance(template_title, str) and template_title.strip() else None
+        if not description and template:
+            template_desc = template.get("description")
+            description = (
+                template_desc.strip() if isinstance(template_desc, str) and template_desc.strip() else None
+            )
+        raw_components = section.get("components")
+        if (not isinstance(raw_components, list) or not raw_components) and template:
+            raw_components = template.get("components")
+        components = _sanitize_components(raw_components, base_prompt, style_default, mood_defaults, used_ids=used_component_ids)
         if not components:
             continue
         if any(comp.get("type") == "media-uploader" for comp in components):
@@ -1556,7 +1663,12 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
             entry["title"] = title
         if description:
             entry["description"] = description
-        section_layout = _normalize_section_layout(section.get("layout"))
+        if card_type:
+            entry["cardType"] = card_type
+        raw_layout = section.get("layout")
+        if raw_layout is None and template:
+            raw_layout = template.get("layout")
+        section_layout = _normalize_section_layout(raw_layout)
         if section_layout:
             entry["layout"] = section_layout
         sanitized_sections.append(entry)
@@ -1594,20 +1706,25 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用规则兜底布局）"
         return fallback
 
+    component_library = _load_component_library()
+    component_library_json = json.dumps(component_library, ensure_ascii=False)
     layout_system = (
         "你是 AIGC 配置页生成器。请根据用户需求生成“专属编辑布局”。\n"
         "输出必须是单个 JSON 对象，仅包含字段：text_response(string), layout_config(object)。\n"
         f"layout_config.meta 包含 sourcePrompt, summary, aspect_ratio, schema_version(固定为 {LAYOUT_SCHEMA_VERSION})，可选 aspect_ratio_field 与 layout。\n"
         "meta.layout 可包含 columns/minCardWidth/gap/dense。\n"
-        "layout_config.sections 为数组，每项包含 id, title, components，可选 description 与 layout(span,tone)。tone 仅可为 accent/soft。\n"
+        "layout_config.sections 为数组，每项包含 id, title, components，可选 description、cardType 与 layout(span,tone)。tone 仅可为 accent/soft。\n"
+        "cardType 应尽量选用组件库中的 cardType；不要输出 reservedCardTypes 中的类型（系统已内置）。\n"
+        "如果选用 cardType，可省略 components/title/description/layout，系统会按组件库模板补全；如需定制，可在输出中覆盖。\n"
         "components 的 type 仅可为：text-input, textarea, select, multi-select, media-uploader, number-input, slider, toggle, ratio-select, color-palette, prompt-editor。\n"
-        "select/multi-select/ratio-select 需要 options(string[])，可选 display:'chips' 以使用按钮样式。\n"
+        "select/multi-select/ratio-select 需要 options，可用 string[] 或 {value,label,description,image,previewPrompt,color}[]；display 可选 chips/cards/images/swatches。\n"
         "number-input/slider 可包含 min/max/step/default/unit/helperText。\n"
         "toggle 可包含 default(boolean)/helperText。\n"
         "color-palette 需要 options，支持 string 或 {value,label,color}。\n"
         "prompt-editor 需要 fields，fields 为 {id,label,placeholder,default,helperText}。\n"
         "media-uploader 组件可以先不填 slots 或仅给出占位，slots 会在第二步生成。\n"
         "建议输出 4-6 个 sections，使用 3 列布局（columns=3, minCardWidth≈280, gap=2），并给出不同的 span 以形成仪表盘布局。\n"
+        f"组件库元数据如下（JSON）：{component_library_json}\n"
         "请使用中文，不要包含多余解释或 Markdown。"
     )
     slots_system = (

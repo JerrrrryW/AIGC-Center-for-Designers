@@ -40,6 +40,7 @@ type LayoutComponent = {
 
 type LayoutSection = {
   id: string;
+  cardType?: string;
   components?: LayoutComponent[];
 };
 

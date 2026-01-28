@@ -176,7 +176,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <TextField
               label="Model"
               size="small"
-              placeholder="Qwen/Qwen2.5-7B-Instruct"
+              placeholder="Qwen/Qwen3-Next-80B-A3B-Instruct"
               value={llmConfig.model}
               onChange={(e) => setLlmConfig((prev) => ({ ...prev, model: e.target.value }))}
               fullWidth

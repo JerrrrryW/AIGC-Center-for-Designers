@@ -4,6 +4,7 @@ import {
   Card,
   CardContent,
   Chip,
+  CircularProgress,
   FormControl,
   FormControlLabel,
   FormHelperText,
@@ -22,6 +23,7 @@ import {
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
+import { api } from '../../../api';
 
 export type LayoutConfig = {
   meta?: Record<string, any>;
@@ -32,6 +34,7 @@ export type LayoutSection = {
   id: string;
   title?: string;
   description?: string;
+  cardType?: string;
   layout?: {
     span?: number;
     tone?: 'accent' | 'soft';
@@ -72,14 +75,14 @@ type TextareaComponent = BaseComponent & {
 
 type SelectComponent = BaseComponent & {
   type: 'select';
-  options: string[];
-  display?: 'chips';
+  options: OptionItem[];
+  display?: 'chips' | 'cards' | 'images' | 'swatches';
 };
 
 type MultiSelectComponent = BaseComponent & {
   type: 'multi-select';
-  options: string[];
-  display?: 'chips';
+  options: OptionItem[];
+  display?: 'chips' | 'cards' | 'images' | 'swatches';
 };
 
 type NumberInputComponent = BaseComponent & {
@@ -107,12 +110,33 @@ type ToggleComponent = BaseComponent & {
 
 type RatioSelectComponent = BaseComponent & {
   type: 'ratio-select';
-  options: string[];
+  options: OptionItem[];
+  display?: 'chips' | 'cards' | 'images' | 'swatches';
 };
 
 type PaletteOption = {
   value: string;
   label?: string;
+  color?: string;
+};
+
+type VisualOption = {
+  value: string;
+  label?: string;
+  description?: string;
+  image?: string;
+  previewPrompt?: string;
+  color?: string;
+};
+
+type OptionItem = string | VisualOption;
+
+type NormalizedOption = {
+  value: string;
+  label: string;
+  description?: string;
+  image?: string;
+  previewPrompt?: string;
   color?: string;
 };
 
@@ -203,6 +227,7 @@ const DynamicRenderer: React.FC<DynamicRendererProps> = ({
       <SectionCard
         key={section.id}
         section={section}
+        cardType={section.cardType}
         gridColumn={gridColumn}
         cardToneStyle={cardToneStyle}
         state={state}
@@ -239,6 +264,7 @@ export default DynamicRenderer;
 
 type SectionCardProps = {
   section: LayoutSection;
+  cardType?: string;
   gridColumn?: any;
   cardToneStyle?: Record<string, any>;
   state: Record<string, any>;
@@ -251,6 +277,7 @@ type SectionCardProps = {
 
 export const SectionCard: React.FC<SectionCardProps> = ({
   section,
+  cardType,
   gridColumn,
   cardToneStyle,
   state,
@@ -263,6 +290,7 @@ export const SectionCard: React.FC<SectionCardProps> = ({
   return (
     <Card
       variant="outlined"
+      data-card-type={cardType}
       sx={{
         gridColumn,
         minWidth: 0,
@@ -358,6 +386,141 @@ const resolvePaletteSwatch = (option: NormalizedPaletteOption): string | undefin
   return undefined;
 };
 
+const normalizeOptions = (options: OptionItem[] | undefined): NormalizedOption[] => {
+  if (!options) return [];
+  return options
+    .map((opt) => {
+      if (typeof opt === 'string') {
+        return { value: opt, label: opt };
+      }
+      const rawValue = opt.value || opt.label;
+      if (!rawValue) return null;
+      return {
+        value: rawValue,
+        label: opt.label || rawValue,
+        description: opt.description,
+        image: opt.image,
+        previewPrompt: opt.previewPrompt,
+        color: opt.color,
+      };
+    })
+    .filter(Boolean) as NormalizedOption[];
+};
+
+type OptionCardProps = {
+  option: NormalizedOption;
+  selected: boolean;
+  onSelect: () => void;
+  previewUrl?: string;
+  loading?: boolean;
+  onGeneratePreview?: () => void;
+  disabled?: boolean;
+};
+
+const OptionCard: React.FC<OptionCardProps> = ({
+  option,
+  selected,
+  onSelect,
+  previewUrl,
+  loading,
+  onGeneratePreview,
+  disabled,
+}) => {
+  const imageUrl = previewUrl || option.image;
+  return (
+    <Box
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        if (!disabled) onSelect();
+      }}
+      onKeyDown={(e) => {
+        if (disabled) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      sx={{
+        border: selected ? '2px solid' : '1px solid',
+        borderColor: selected ? 'primary.main' : 'rgba(15, 23, 42, 0.15)',
+        borderRadius: 1.5,
+        p: 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 0.75,
+        position: 'relative',
+        backgroundColor: '#fff',
+        minHeight: 120,
+      }}
+    >
+      <Box
+        sx={{
+          position: 'relative',
+          width: '100%',
+          borderRadius: 1,
+          overflow: 'hidden',
+          backgroundColor: option.color || 'rgba(15, 23, 42, 0.04)',
+          border: '1px solid rgba(15, 23, 42, 0.08)',
+          height: 80,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {imageUrl ? (
+          <Box
+            component="img"
+            src={imageUrl}
+            alt={option.label}
+            sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            {option.color ? '' : '暂无预览'}
+          </Typography>
+        )}
+        {onGeneratePreview && !imageUrl ? (
+          <IconButton
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              onGeneratePreview();
+            }}
+            sx={{
+              position: 'absolute',
+              right: 4,
+              bottom: 4,
+              backgroundColor: 'rgba(255,255,255,0.85)',
+            }}
+            disabled={disabled || loading}
+          >
+            {loading ? <CircularProgress size={16} /> : <AutoAwesomeIcon fontSize="inherit" />}
+          </IconButton>
+        ) : null}
+      </Box>
+      <Box>
+        <Typography variant="body2">{option.label}</Typography>
+        {option.description ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            {option.description}
+          </Typography>
+        ) : null}
+      </Box>
+      {selected ? (
+        <Chip
+          label="已选"
+          size="small"
+          color="primary"
+          sx={{ position: 'absolute', top: 6, right: 6 }}
+        />
+      ) : null}
+    </Box>
+  );
+};
+
 const ComponentRenderer: React.FC<ComponentRendererProps> = ({
   component,
   value,
@@ -367,6 +530,31 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
   onSlotRemoveBackground,
   disabled,
 }) => {
+  const [optionPreviews, setOptionPreviews] = useState<Record<string, string>>({});
+  const [optionLoading, setOptionLoading] = useState<Record<string, boolean>>({});
+
+  const handleGenerateOptionPreview = async (key: string, prompt?: string) => {
+    if (!prompt || optionLoading[key]) return;
+    setOptionLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await api.post('/generate-image', {
+        prompt,
+        width: 192,
+        height: 192,
+        num_inference_steps: 12,
+      });
+      const base64 = res.data?.image_base64;
+      if (base64) {
+        const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
+        setOptionPreviews((prev) => ({ ...prev, [key]: dataUrl }));
+      }
+    } catch (error) {
+      // Swallow preview errors; user can retry.
+    } finally {
+      setOptionLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
   switch (component.type) {
     case 'text-input':
       return (
@@ -392,9 +580,12 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
           disabled={disabled}
         />
       );
-    case 'select':
-      if (component.display === 'chips') {
-        const currentValue = value ?? component.default ?? component.options?.[0] ?? '';
+    case 'select': {
+      const options = normalizeOptions(component.options);
+      const defaultValue = component.default ?? options[0]?.value ?? '';
+      const currentValue = typeof value === 'string' && value ? value : defaultValue;
+      const display = component.display;
+      if (display === 'chips') {
         return (
           <Box>
             {component.label ? (
@@ -411,12 +602,52 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
               size="small"
               disabled={disabled}
             >
-              {(component.options ?? []).map((opt) => (
-                <ToggleButton key={opt} value={opt}>
-                  {opt}
+              {options.map((opt) => (
+                <ToggleButton key={opt.value} value={opt.value}>
+                  {opt.label}
                 </ToggleButton>
               ))}
             </ToggleButtonGroup>
+            {component.helperText ? <FormHelperText>{component.helperText}</FormHelperText> : null}
+          </Box>
+        );
+      }
+      if (display === 'cards' || display === 'images' || display === 'swatches') {
+        return (
+          <Box>
+            {component.label ? (
+              <Typography variant="body2" gutterBottom>
+                {component.label}
+              </Typography>
+            ) : null}
+            <Box
+              sx={{
+                display: 'grid',
+                gap: 1,
+                gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+              }}
+            >
+              {options.map((opt) => {
+                const key = `${component.id}:${opt.value}`;
+                return (
+                  <OptionCard
+                    key={opt.value}
+                    option={opt}
+                    selected={currentValue === opt.value}
+                    previewUrl={optionPreviews[key]}
+                    loading={optionLoading[key]}
+                    onGeneratePreview={
+                      opt.previewPrompt
+                        ? () => handleGenerateOptionPreview(key, opt.previewPrompt)
+                        : undefined
+                    }
+                    onSelect={() => onChange(opt.value)}
+                    disabled={disabled}
+                  />
+                );
+              })}
+            </Box>
+            {component.helperText ? <FormHelperText>{component.helperText}</FormHelperText> : null}
           </Box>
         );
       }
@@ -425,20 +656,23 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
           <InputLabel>{component.label}</InputLabel>
           <Select
             label={component.label}
-            value={value ?? component.default ?? component.options?.[0] ?? ''}
+            value={currentValue}
             onChange={(e) => onChange(e.target.value)}
           >
-            {(component.options ?? []).map((opt) => (
-              <MenuItem key={opt} value={opt}>
-                {opt}
+            {options.map((opt) => (
+              <MenuItem key={opt.value} value={opt.value}>
+                {opt.label}
               </MenuItem>
             ))}
           </Select>
         </FormControl>
       );
+    }
     case 'multi-select': {
+      const options = normalizeOptions(component.options);
       const values = Array.isArray(value) ? value : component.default ?? [];
-      if (component.display === 'chips') {
+      const display = component.display;
+      if (display === 'chips') {
         return (
           <Box>
             {component.label ? (
@@ -447,25 +681,74 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
               </Typography>
             ) : null}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              {(component.options ?? []).map((opt) => {
-                const selected = values.includes(opt);
+              {options.map((opt) => {
+                const selected = values.includes(opt.value);
                 return (
                   <Chip
-                    key={opt}
-                    label={opt}
+                    key={opt.value}
+                    label={opt.label}
                     size="small"
                     clickable
                     color={selected ? 'primary' : 'default'}
                     variant={selected ? 'filled' : 'outlined'}
                     onClick={() => {
                       if (disabled) return;
-                      const next = selected ? values.filter((v) => v !== opt) : [...values, opt];
+                      const next = selected
+                        ? values.filter((v) => v !== opt.value)
+                        : [...values, opt.value];
                       onChange(next);
                     }}
                   />
                 );
               })}
             </Stack>
+            {component.helperText ? <FormHelperText>{component.helperText}</FormHelperText> : null}
+          </Box>
+        );
+      }
+      if (display === 'cards' || display === 'images' || display === 'swatches') {
+        return (
+          <Box>
+            {component.label ? (
+              <Typography variant="body2" gutterBottom>
+                {component.label}
+              </Typography>
+            ) : null}
+            <Box
+              sx={{
+                display: 'grid',
+                gap: 1,
+                gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+              }}
+            >
+              {options.map((opt) => {
+                const key = `${component.id}:${opt.value}`;
+                const selected = values.includes(opt.value);
+                return (
+                  <OptionCard
+                    key={opt.value}
+                    option={opt}
+                    selected={selected}
+                    previewUrl={optionPreviews[key]}
+                    loading={optionLoading[key]}
+                    onGeneratePreview={
+                      opt.previewPrompt
+                        ? () => handleGenerateOptionPreview(key, opt.previewPrompt)
+                        : undefined
+                    }
+                    onSelect={() => {
+                      if (disabled) return;
+                      const next = selected
+                        ? values.filter((v) => v !== opt.value)
+                        : [...values, opt.value];
+                      onChange(next);
+                    }}
+                    disabled={disabled}
+                  />
+                );
+              })}
+            </Box>
+            {component.helperText ? <FormHelperText>{component.helperText}</FormHelperText> : null}
           </Box>
         );
       }
@@ -485,9 +768,9 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
               </Stack>
             )}
           >
-            {(component.options ?? []).map((opt) => (
-              <MenuItem key={opt} value={opt}>
-                {opt}
+            {options.map((opt) => (
+              <MenuItem key={opt.value} value={opt.value}>
+                {opt.label}
               </MenuItem>
             ))}
           </Select>
@@ -564,9 +847,48 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
       );
     }
     case 'ratio-select': {
-      const options = component.options ?? [];
+      const options = normalizeOptions(component.options);
       const currentValue =
-        typeof value === 'string' && value ? value : component.default ?? options[0] ?? '';
+        typeof value === 'string' && value ? value : component.default ?? options[0]?.value ?? '';
+      const display = component.display;
+      if (display === 'cards' || display === 'images' || display === 'swatches') {
+        return (
+          <Box>
+            {component.label ? (
+              <Typography variant="body2" gutterBottom>
+                {component.label}
+              </Typography>
+            ) : null}
+            <Box
+              sx={{
+                display: 'grid',
+                gap: 1,
+                gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+              }}
+            >
+              {options.map((opt) => {
+                const key = `${component.id}:${opt.value}`;
+                return (
+                  <OptionCard
+                    key={opt.value}
+                    option={opt}
+                    selected={currentValue === opt.value}
+                    previewUrl={optionPreviews[key]}
+                    loading={optionLoading[key]}
+                    onGeneratePreview={
+                      opt.previewPrompt
+                        ? () => handleGenerateOptionPreview(key, opt.previewPrompt)
+                        : undefined
+                    }
+                    onSelect={() => onChange(opt.value)}
+                    disabled={disabled}
+                  />
+                );
+              })}
+            </Box>
+          </Box>
+        );
+      }
       return (
         <Box>
           {component.label ? (
@@ -584,8 +906,8 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
             disabled={disabled}
           >
             {options.map((opt) => (
-              <ToggleButton key={opt} value={opt}>
-                {opt}
+              <ToggleButton key={opt.value} value={opt.value}>
+                {opt.label}
               </ToggleButton>
             ))}
           </ToggleButtonGroup>

@@ -1,0 +1,319 @@
+{
+  "version": "1.0",
+  "updatedAt": "2026-01-27",
+  "description": "AIGC 文生图阶段 - 设计师常用参数组件库元数据",
+  "reservedCardTypes": ["intent-board", "preview"],
+  "cardTypes": [
+    {
+      "cardType": "base-info",
+      "title": "场景基础",
+      "description": "定义画幅与核心描述",
+      "layout": { "span": 1, "tone": "soft" },
+      "components": [
+        {
+          "id": "scene-title",
+          "type": "text-input",
+          "label": "场景名称",
+          "placeholder": "例如：未来城市夜景"
+        },
+        {
+          "id": "scene-aspect",
+          "type": "ratio-select",
+          "label": "画幅比例",
+          "options": ["3:4", "1:1", "16:9", "9:16"],
+          "helperText": "用于预览与导出比例"
+        },
+        {
+          "id": "scene-brief",
+          "type": "textarea",
+          "label": "核心描述",
+          "placeholder": "主体 / 环境 / 风格关键词"
+        }
+      ]
+    },
+    {
+      "cardType": "style-core",
+      "title": "画风与质感",
+      "description": "控制整体视觉风格与表现媒介",
+      "layout": { "span": 2, "tone": "accent" },
+      "components": [
+        {
+          "id": "style-direction",
+          "type": "select",
+          "label": "风格方向",
+          "options": [
+            { "value": "写实摄影", "label": "写实摄影", "previewPrompt": "photorealistic city street, natural daylight, high detail" },
+            { "value": "电影感", "label": "电影感", "previewPrompt": "cinematic lighting, moody atmosphere, shallow depth of field" },
+            { "value": "二次元插画", "label": "二次元插画", "previewPrompt": "anime illustration, clean lines, vibrant colors" },
+            { "value": "3D 渲染", "label": "3D 渲染", "previewPrompt": "3d render, soft global illumination, realistic materials" },
+            { "value": "平面海报", "label": "平面海报", "previewPrompt": "graphic poster design, bold typography, minimal shapes" },
+            { "value": "国风", "label": "国风", "previewPrompt": "chinese ink style, elegant brush strokes, serene landscape" },
+            { "value": "赛博朋克", "label": "赛博朋克", "previewPrompt": "cyberpunk city, neon lights, rain, high contrast" },
+            { "value": "水彩", "label": "水彩", "previewPrompt": "watercolor painting, soft wash, paper texture" },
+            { "value": "复古胶片", "label": "复古胶片", "previewPrompt": "vintage film photo, grain, muted colors" },
+            { "value": "极简", "label": "极简", "previewPrompt": "minimalist composition, clean background, soft light" }
+          ],
+          "display": "cards"
+        },
+        {
+          "id": "render-medium",
+          "type": "multi-select",
+          "label": "表现媒介",
+          "options": ["油画", "水彩", "赛璐璐", "纸艺", "黏土", "金属", "玻璃", "霓虹", "胶片质感", "素描", "粉彩"],
+          "display": "chips"
+        },
+        {
+          "id": "detail-level",
+          "type": "slider",
+          "label": "细节丰富度",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3,
+          "helperText": "数值越高细节越多"
+        }
+      ]
+    },
+    {
+      "cardType": "lighting",
+      "title": "光影",
+      "description": "控制光线方向与层次",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "light-time",
+          "type": "select",
+          "label": "时间段",
+          "options": ["清晨", "上午", "正午", "黄昏", "蓝调时刻", "夜景", "室内"],
+          "display": "chips"
+        },
+        {
+          "id": "light-type",
+          "type": "select",
+          "label": "光线类型",
+          "options": ["自然光", "柔光", "硬光", "逆光", "侧光", "顶光", "霓虹灯", "电影布光", "舞台光"],
+          "display": "chips"
+        },
+        {
+          "id": "light-contrast",
+          "type": "slider",
+          "label": "明暗对比",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3
+        }
+      ]
+    },
+    {
+      "cardType": "composition",
+      "title": "构图与布局",
+      "description": "控制主体位置与视觉重心",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "composition-type",
+          "type": "select",
+          "label": "构图方式",
+          "options": ["居中", "三分法", "黄金分割", "对角线", "对称", "引导线", "框中框", "留白"],
+          "display": "chips"
+        },
+        {
+          "id": "subject-scale",
+          "type": "slider",
+          "label": "主体占比",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3
+        },
+        {
+          "id": "negative-space",
+          "type": "toggle",
+          "label": "强调留白",
+          "default": false
+        }
+      ]
+    },
+    {
+      "cardType": "camera",
+      "title": "镜头与视角",
+      "description": "控制镜头焦段与视角",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "shot-size",
+          "type": "select",
+          "label": "景别",
+          "options": ["远景", "全景", "中景", "近景", "特写", "极近景"],
+          "display": "chips"
+        },
+        {
+          "id": "view-angle",
+          "type": "select",
+          "label": "视角",
+          "options": ["俯视", "平视", "仰视", "倾斜"],
+          "display": "chips"
+        },
+        {
+          "id": "lens-type",
+          "type": "select",
+          "label": "镜头类型",
+          "options": ["广角", "标准", "长焦"],
+          "display": "chips"
+        },
+        {
+          "id": "depth-of-field",
+          "type": "slider",
+          "label": "景深",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3
+        }
+      ]
+    },
+    {
+      "cardType": "color-grade",
+      "title": "色彩与调性",
+      "description": "控制色调与对比",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "palette",
+          "type": "color-palette",
+          "label": "主色调",
+          "options": [
+            { "value": "warm", "label": "暖色", "color": "#F4A261" },
+            { "value": "cool", "label": "冷色", "color": "#5DADE2" },
+            { "value": "muted", "label": "低饱和", "color": "#AAB7B8" },
+            { "value": "contrast", "label": "高对比", "color": "#1F1F1F" },
+            { "value": "pastel", "label": "粉彩", "color": "#F7C7D9" },
+            { "value": "vintage", "label": "复古", "color": "#C27C4D" },
+            { "value": "neon", "label": "霓虹", "color": "#7C4DFF" },
+            { "value": "earth", "label": "大地色", "color": "#A47551" }
+          ],
+          "default": "warm"
+        },
+        {
+          "id": "saturation",
+          "type": "slider",
+          "label": "饱和度",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3
+        },
+        {
+          "id": "contrast",
+          "type": "slider",
+          "label": "对比度",
+          "min": 1,
+          "max": 5,
+          "step": 1,
+          "default": 3
+        }
+      ]
+    },
+    {
+      "cardType": "atmosphere",
+      "title": "氛围与环境",
+      "description": "控制情绪、天气与环境质感",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "mood-tags",
+          "type": "multi-select",
+          "label": "氛围标签",
+          "options": ["清新", "梦幻", "史诗", "温暖", "冷峻", "暗黑", "赛博", "复古", "浪漫", "神秘", "庄严"],
+          "display": "chips"
+        },
+        {
+          "id": "weather",
+          "type": "select",
+          "label": "天气",
+          "options": ["晴朗", "阴天", "雨天", "雾", "雪", "风暴"],
+          "display": "chips"
+        },
+        {
+          "id": "haze",
+          "type": "toggle",
+          "label": "添加薄雾",
+          "default": false
+        }
+      ]
+    },
+    {
+      "cardType": "prompt-core",
+      "title": "提示词编辑",
+      "description": "编辑正向与负向提示词",
+      "layout": { "span": 2, "tone": "accent" },
+      "components": [
+        {
+          "id": "prompt-editor",
+          "type": "prompt-editor",
+          "title": "提示词",
+          "fields": [
+            {
+              "id": "positive",
+              "label": "正向提示词",
+              "placeholder": "主体、风格、氛围、镜头、材质"
+            },
+            {
+              "id": "negative",
+              "label": "负向提示词",
+              "placeholder": "不希望出现的元素"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "cardType": "generation-settings",
+      "title": "生成参数",
+      "description": "控制生成强度与稳定性",
+      "layout": { "span": 1 },
+      "components": [
+        {
+          "id": "cfg-scale",
+          "type": "slider",
+          "label": "提示词强度",
+          "min": 3,
+          "max": 12,
+          "step": 0.5,
+          "default": 7
+        },
+        {
+          "id": "steps",
+          "type": "number-input",
+          "label": "推理步数",
+          "min": 10,
+          "max": 60,
+          "step": 1,
+          "default": 28,
+          "unit": "步"
+        },
+        {
+          "id": "seed-lock",
+          "type": "toggle",
+          "label": "固定随机种子",
+          "default": false
+        }
+      ]
+    },
+    {
+      "cardType": "materials",
+      "title": "素材与图层",
+      "description": "上传或生成图层素材",
+      "layout": { "span": 2, "tone": "soft" },
+      "components": [
+        {
+          "id": "materials-uploader",
+          "type": "media-uploader",
+          "title": "素材图层",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

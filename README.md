@@ -94,7 +94,7 @@ npm run dev -- --host 0.0.0.0
 * **必需**：`SILICONFLOW_API_KEY`
 * **可选（聊天）**：
   * `SILICONFLOW_BASE_URL`（默认：`https://api.siliconflow.cn/v1/chat/completions`）
-  * `SILICONFLOW_MODEL`（默认：`Qwen/Qwen2.5-7B-Instruct`）
+  * `SILICONFLOW_MODEL`（默认：`Qwen/Qwen3-Next-80B-A3B-Instruct`）
 * **可选（生图）**：
   * `IMAGE_GENERATION_PROVIDER`（`siliconflow`/`local`/`auto`，默认：有 `SILICONFLOW_API_KEY` 时为 `siliconflow`）
   * `SILICONFLOW_IMAGE_BASE_URL`（默认：`https://api.siliconflow.cn/v1`）

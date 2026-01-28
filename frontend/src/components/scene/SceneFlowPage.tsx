@@ -845,11 +845,16 @@ const SceneFlowPage: React.FC = () => {
     const subjects = mediaSlots.filter((slot) => slot.layerType !== 'background');
     return { bgSlot, subjects };
   }, [mediaSlots]);
+  const filledSlotCount = useMemo(() => mediaSlots.filter((slot) => slot.uri).length, [mediaSlots]);
 
   const layoutMeta = useMemo(() => (layoutConfig?.meta ?? {}).layout ?? {}, [layoutConfig]);
+  const layoutSections = useMemo(
+    () => (layoutConfig?.sections ?? []).filter((section) => !isReservedSection(section)),
+    [layoutConfig],
+  );
   const layoutColumns = Math.max(1, Math.floor(coerceNumber(layoutMeta.columns) ?? 5));
   const layouts = useMemo<Layouts>(() => {
-    const sections = layoutConfig?.sections ?? [];
+    const sections = layoutSections;
     const spanToWidth = (cols: number, span: number) => {
       const colUnit = Math.max(1, Math.floor(cols / layoutColumns));
       return Math.min(cols, Math.max(1, span * colUnit));
@@ -903,7 +908,7 @@ const SceneFlowPage: React.FC = () => {
       sm: buildForCols(GRID_COLS.sm),
       xs: buildForCols(GRID_COLS.xs),
     };
-  }, [layoutColumns, layoutConfig, showQuick]);
+  }, [layoutColumns, layoutConfig, layoutSections, showQuick]);
 
   const actionDisabled = isSending || isWorking;
   const actionBar = useMemo(() => {
@@ -966,9 +971,9 @@ const SceneFlowPage: React.FC = () => {
         pb: 10,
       }}
     >
-      <Typography variant="h4" component="h1" gutterBottom>
+      {/* <Typography variant="h4" component="h1" gutterBottom>
         AI 场景生成
-      </Typography>
+      </Typography> */}
 
       <Stepper activeStep={activeStep} sx={{ mb: 1 }}>
         {FLOW_STEPS.map((label) => (
@@ -1205,9 +1210,9 @@ const SceneFlowPage: React.FC = () => {
                 <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                   <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
                     <Box>
-                      <Typography variant="h6">编辑目标概要</Typography>
+                      <Typography variant="h6">系统信息</Typography>
                       <Typography variant="caption" color="text.secondary">
-                        当前配置摘要
+                        结构总览与关键状态
                       </Typography>
                     </Box>
                     <Chip label="编辑阶段" size="small" />
@@ -1225,6 +1230,11 @@ const SceneFlowPage: React.FC = () => {
                       InputProps={{ readOnly: true }}
                     />
                   ) : null}
+                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                    <Chip label={`图层 ${filledSlotCount}/${mediaSlots.length}`} size="small" />
+                    <Chip label={`预览 ${previewItems.length ? '已生成' : '未生成'}`} size="small" />
+                    <Chip label={`参数区 ${layoutSections.length}`} size="small" />
+                  </Stack>
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Button
                       variant="outlined"
@@ -1244,10 +1254,11 @@ const SceneFlowPage: React.FC = () => {
           ) : null}
 
           {layoutConfig
-            ? (layoutConfig.sections ?? []).map((section) => (
+            ? layoutSections.map((section) => (
                 <div key={`section-${section.id}`}>
                   <SectionCard
                     section={section as LayoutSection}
+                    cardType={section.cardType}
                     state={uiState}
                     onStateChange={handleStateChange}
                     onSlotUpload={handleSlotUpload}
@@ -1267,7 +1278,7 @@ const SceneFlowPage: React.FC = () => {
                 >
                   <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
                     <Box>
-                      <Typography variant="h6">预览卡片</Typography>
+                      <Typography variant="h6">生图预览</Typography>
                       <Typography variant="caption" color="text.secondary">
                         素材与合成结果概览
                       </Typography>
@@ -1659,6 +1670,12 @@ function buildSelectedOptionsPayload(
 }
 
 type LayoutItemSpec = { i: string; w: number; h: number };
+
+function isReservedSection(section?: LayoutSection): boolean {
+  if (!section?.cardType) return false;
+  const type = section.cardType.toLowerCase();
+  return type === 'preview' || type === 'intent-board' || type === 'intent' || type === 'board';
+}
 
 function packGridItems(items: LayoutItemSpec[], cols: number): Layout[] {
   const colHeights = Array.from({ length: cols }, () => 0);
