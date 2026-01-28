@@ -13,6 +13,7 @@ import io
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 from threading import Lock
 from PIL import Image, ImageDraw, ImageFont
 
@@ -370,6 +371,12 @@ def _resolve_llm_temperature() -> float:
             return float(env_temp)
         except ValueError:
             pass
+    env_temp = os.getenv("GEMINI_TEMPERATURE", "").strip()
+    if env_temp:
+        try:
+            return float(env_temp)
+        except ValueError:
+            pass
     return 0.4
 
 
@@ -377,13 +384,19 @@ def _resolve_llm_config() -> dict:
     api_key = (llm_runtime_config.get("api_key") or "").strip()
     if not api_key:
         api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+    if not api_key:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
     base_url = (llm_runtime_config.get("base_url") or "").strip()
     if not base_url:
         base_url = os.getenv("SILICONFLOW_BASE_URL", "").strip()
+    if not base_url:
+        base_url = os.getenv("GEMINI_BASE_URL", "").strip()
     base_url = base_url or "https://api.siliconflow.cn/v1/chat/completions"
     model = (llm_runtime_config.get("model") or "").strip()
     if not model:
         model = os.getenv("SILICONFLOW_MODEL", "").strip()
+    if not model:
+        model = os.getenv("GEMINI_MODEL", "").strip()
     model = model or "Qwen/Qwen3-Next-80B-A3B-Instruct"
     temperature = _resolve_llm_temperature()
     return {
@@ -391,10 +404,10 @@ def _resolve_llm_config() -> dict:
         "base_url": base_url,
         "model": model,
         "temperature": temperature,
-    }
+}
 
 
-def _siliconflow_enabled() -> bool:
+def _llm_enabled() -> bool:
     return bool(_resolve_llm_config().get("api_key"))
 
 
@@ -423,18 +436,79 @@ def _siliconflow_image_enabled() -> bool:
     return bool(_resolve_image_config().get("api_key"))
 
 
-def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
-    """
-    Minimal SiliconFlow chat-completions call.
-    Env:
-      - SILICONFLOW_API_KEY (required)
-      - SILICONFLOW_BASE_URL (optional, default OpenAI-compatible endpoint)
-      - SILICONFLOW_MODEL (optional)
-    """
+def _resolve_llm_provider(config: dict) -> str:
+    base_url = (config.get("base_url") or "").strip().lower()
+    if not base_url:
+        return "openai_compatible"
+    if "generativelanguage.googleapis.com" in base_url:
+        return "gemini"
+    if ":generatecontent" in base_url or ":streamgeneratecontent" in base_url:
+        return "gemini"
+    if "googleapis.com" in base_url and "/models/" in base_url:
+        return "gemini"
+    return "openai_compatible"
+
+
+def _build_gemini_endpoint(base_url: str, model: str) -> str:
+    if not base_url:
+        raise RuntimeError("Gemini API 需要 base_url")
+    parsed = urllib.parse.urlsplit(base_url.strip())
+    path = (parsed.path or "").rstrip("/")
+    lower_path = path.lower()
+    if ":generatecontent" in lower_path or ":streamgeneratecontent" in lower_path:
+        return base_url
+    if "/models/" in lower_path:
+        path = f"{path}:generateContent"
+    else:
+        if not model:
+            raise RuntimeError("Gemini API 需要 model")
+        path = f"{path}/models/{model}:generateContent"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
+def _messages_to_gemini_payload(messages: List[dict]) -> dict:
+    system_parts = []
+    contents = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = (msg.get("role") or "").strip().lower()
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if role == "system":
+            system_parts.append(content.strip())
+            continue
+        mapped_role = "model" if role in ("assistant", "bot", "model") else "user"
+        contents.append({"role": mapped_role, "parts": [{"text": content}]})
+    payload = {"contents": contents}
+    if system_parts:
+        payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_parts)}]}
+    return payload
+
+
+def _extract_gemini_text(parsed: dict) -> str:
+    if not isinstance(parsed, dict):
+        return ""
+    candidates = parsed.get("candidates") or []
+    for cand in candidates:
+        content = cand.get("content") or {}
+        parts = content.get("parts") or []
+        texts = []
+        for part in parts:
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+        if texts:
+            return "".join(texts)
+    return ""
+
+
+def _call_openai_compatible_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
     config = _resolve_llm_config()
     api_key = (config.get("api_key") or "").strip()
     if not api_key:
-        raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+        raise RuntimeError("LLM API Key 未设置")
     base_url = config.get("base_url")
     model = config.get("model")
     temperature = config.get("temperature", 0.4)
@@ -464,6 +538,51 @@ def _call_siliconflow_chat(messages: List[dict], timeout_seconds: int = 60) -> s
         .get("message", {})
         .get("content", "")
     )
+
+
+def _call_gemini_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
+    config = _resolve_llm_config()
+    api_key = (config.get("api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("LLM API Key 未设置")
+    base_url = config.get("base_url")
+    model = config.get("model")
+    temperature = config.get("temperature", 0.4)
+
+    endpoint = _build_gemini_endpoint(base_url, model)
+    payload = _messages_to_gemini_payload(messages)
+    if not payload.get("contents"):
+        payload["contents"] = [{"role": "user", "parts": [{"text": ""}]}]
+    payload["generationConfig"] = {
+        "temperature": temperature,
+        "response_mime_type": "application/json",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        method="POST",
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini 调用失败: {body}") from e
+    parsed = json.loads(body)
+    return _extract_gemini_text(parsed)
+
+
+def _call_llm_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
+    config = _resolve_llm_config()
+    provider = _resolve_llm_provider(config)
+    if provider == "gemini":
+        return _call_gemini_chat(messages, timeout_seconds=timeout_seconds)
+    return _call_openai_compatible_chat(messages, timeout_seconds=timeout_seconds)
 
 
 def _resolve_image_provider(requested: Optional[str]) -> str:
@@ -722,7 +841,7 @@ def _normalize_llm_payload(obj: dict, default_text: str) -> dict:
 
 
 def generate_llm_form(user_prompt: str) -> dict:
-    """Generate initial form. Falls back to static form when SiliconFlow is unavailable."""
+    """Generate initial form. Falls back to static form when LLM is unavailable."""
     fallback = {
         "text_response": "好的！为了更接近你想要的效果，请先选几项偏好：",
         "form": [
@@ -752,8 +871,8 @@ def generate_llm_form(user_prompt: str) -> dict:
             },
         ],
     }
-    if not _siliconflow_enabled():
-        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用本地兜底表单）"
+    if not _llm_enabled():
+        fallback["text_response"] += "（当前未配置 LLM API Key，使用本地兜底表单）"
         return fallback
 
     system = (
@@ -771,18 +890,18 @@ def generate_llm_form(user_prompt: str) -> dict:
         {"role": "user", "content": f"用户想生成：{user_prompt}"},
     ]
     try:
-        content = _call_siliconflow_chat(messages)
+        content = _call_llm_chat(messages)
         obj = _safe_parse_json_object(content)
         normalized = _normalize_llm_payload(obj, default_text=fallback["text_response"])
         if normalized.get("form"):
             return normalized
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, ValueError) as e:
-        fallback["text_response"] += f"（SiliconFlow 调用失败：{e}，使用本地兜底表单）"
+        fallback["text_response"] += f"（LLM 调用失败：{e}，使用本地兜底表单）"
         return fallback
     except Exception as e:
-        fallback["text_response"] += f"（SiliconFlow 未知错误：{e}，使用本地兜底表单）"
+        fallback["text_response"] += f"（LLM 未知错误：{e}，使用本地兜底表单）"
         return fallback
-    fallback["text_response"] += "（SiliconFlow 返回格式异常，使用本地兜底表单）"
+    fallback["text_response"] += "（LLM 返回格式异常，使用本地兜底表单）"
     return fallback
 
 
@@ -795,8 +914,8 @@ def generate_llm_chat(messages: List[ChatMessage], selected_options: dict, force
         "text_response": "收到。你也可以继续补充细节，或点击进入编辑界面。",
         "form": [],
     }
-    if not _siliconflow_enabled():
-        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用本地回复）"
+    if not _llm_enabled():
+        fallback["text_response"] += "（当前未配置 LLM API Key，使用本地回复）"
         return fallback
 
     system = (
@@ -820,7 +939,7 @@ def generate_llm_chat(messages: List[ChatMessage], selected_options: dict, force
         {"role": "user", "content": f"当前用户已选表单项(JSON)：{json.dumps(selected_options, ensure_ascii=False)}"}
     )
     try:
-        content = _call_siliconflow_chat(sf_messages)
+        content = _call_llm_chat(sf_messages)
         obj = _safe_parse_json_object(content)
         normalized = _normalize_llm_payload(obj, default_text=fallback["text_response"])
         if force_form and not (normalized.get("form") or []):
@@ -1702,8 +1821,8 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
 
 def generate_llm_layout(req: LayoutRequest) -> dict:
     fallback = _build_rule_layout_payload(req.prompt, req.chat_history, req.selected_options)
-    if not _siliconflow_enabled():
-        fallback["text_response"] += "（当前未配置 SILICONFLOW_API_KEY，使用规则兜底布局）"
+    if not _llm_enabled():
+        fallback["text_response"] += "（当前未配置 LLM API Key，使用规则兜底布局）"
         return fallback
 
     component_library = _load_component_library()
@@ -1742,7 +1861,7 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         "请据此生成布局。"
     )
     try:
-        layout_content = _call_siliconflow_chat(
+        layout_content = _call_llm_chat(
             [
                 {"role": "system", "content": layout_system},
                 {"role": "user", "content": user},
@@ -1757,7 +1876,7 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
         fallback["text_response"] += f"（布局生成未知错误：{e}，使用规则兜底布局）"
 
     try:
-        slots_content = _call_siliconflow_chat(
+        slots_content = _call_llm_chat(
             [
                 {"role": "system", "content": slots_system},
                 {"role": "user", "content": user},
