@@ -1063,8 +1063,6 @@ const SceneFlowPage: React.FC = () => {
         previewItemsCount={previewItems.length}
         previewCanvasWidth={previewCanvasWidth}
         previewCanvasHeight={previewCanvasHeight}
-        generatedPrompt={generatedPrompt}
-        selectedOptions={selectedOptions}
         layerPlan={layerPlan}
         sceneDraft={sceneDraft}
         materialsSection={materialsSection}

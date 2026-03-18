@@ -453,15 +453,29 @@ const OptionCard: React.FC<OptionCardProps> = ({
         border: selected ? '2px solid' : '1px solid',
         borderColor: selected ? 'primary.main' : 'rgba(15, 23, 42, 0.15)',
         borderRadius: 1.5,
-        p: 1,
+        p: 0.875,
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.6 : 1,
         display: 'flex',
         flexDirection: 'column',
-        gap: 0.75,
+        gap: 0.625,
         position: 'relative',
         backgroundColor: '#fff',
-        minHeight: 120,
+        minHeight: 98,
+        transition: 'border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease',
+        '&:hover': disabled
+          ? undefined
+          : {
+              boxShadow: '0 10px 26px rgba(15, 23, 42, 0.10)',
+              transform: 'translateY(-1px)',
+            },
+        '&:hover .option-preview-popover': imageUrl
+          ? {
+              opacity: 1,
+              visibility: 'visible',
+              transform: 'translate(-50%, -8px)',
+            }
+          : undefined,
       }}
     >
       <Box
@@ -472,7 +486,7 @@ const OptionCard: React.FC<OptionCardProps> = ({
           overflow: 'hidden',
           backgroundColor: option.color || 'rgba(15, 23, 42, 0.04)',
           border: '1px solid rgba(15, 23, 42, 0.08)',
-          height: 80,
+          height: 56,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -509,10 +523,49 @@ const OptionCard: React.FC<OptionCardProps> = ({
           </IconButton>
         ) : null}
       </Box>
+      {imageUrl ? (
+        <Box
+          className="option-preview-popover"
+          sx={{
+            position: 'absolute',
+            left: '50%',
+            top: 0,
+            width: 220,
+            height: 220,
+            transform: 'translate(-50%, -2px)',
+            opacity: 0,
+            visibility: 'hidden',
+            transition: 'opacity 160ms ease, transform 160ms ease, visibility 160ms ease',
+            pointerEvents: 'none',
+            zIndex: 6,
+            borderRadius: 2,
+            overflow: 'hidden',
+            border: '1px solid rgba(15, 23, 42, 0.12)',
+            boxShadow: '0 18px 40px rgba(15, 23, 42, 0.18)',
+            backgroundColor: '#fff',
+          }}
+        >
+          <Box
+            component="img"
+            src={imageUrl}
+            alt={option.label}
+            sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+          />
+        </Box>
+      ) : null}
       <Box>
         <Typography variant="body2">{option.label}</Typography>
         {option.description ? (
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{
+              display: '-webkit-box',
+              overflow: 'hidden',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+            }}
+          >
             {option.description}
           </Typography>
         ) : null}

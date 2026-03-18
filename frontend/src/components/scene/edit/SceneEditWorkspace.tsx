@@ -57,8 +57,6 @@ type SceneEditWorkspaceProps = {
   previewItemsCount: number;
   previewCanvasWidth: number;
   previewCanvasHeight: number;
-  generatedPrompt: string;
-  selectedOptions: Record<string, string[]>;
   layerPlan: any;
   sceneDraft?: SceneDraft;
   materialsSection?: LayoutSection;
@@ -86,8 +84,6 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
   previewItemsCount,
   previewCanvasWidth,
   previewCanvasHeight,
-  generatedPrompt,
-  selectedOptions,
   layerPlan,
   sceneDraft,
   materialsSection,
@@ -151,17 +147,12 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
       >
         <Box sx={{ minWidth: 0, pr: { xl: 1 }, display: 'flex', flexDirection: 'column', gap: 2, overflow: 'visible' }}>
           <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-            <Box>
-              <Typography variant="h6">编辑工作台</Typography>
-              <Typography variant="caption" color="text.secondary">
-                固定素材区、文案区和参数区，避免布局波动影响编辑体验
-              </Typography>
-            </Box>
+            <Typography variant="h6">编辑</Typography>
             <Chip label={previewSyncLabel} size="small" color={isPreviewSyncing ? 'default' : 'success'} />
           </Stack>
 
-          {status.message ? (
-            <Alert severity={status.type === 'error' ? 'error' : status.type === 'success' ? 'success' : 'info'}>
+          {status.type === 'error' && status.message ? (
+            <Alert severity="error">
               {status.message}
             </Alert>
           ) : null}
@@ -170,8 +161,6 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
             materialsSection={materialsSection}
             uiState={uiState}
             sceneDraft={sceneDraft}
-            generatedPrompt={generatedPrompt}
-            selectedOptions={selectedOptions}
             layerPlan={layerPlan}
             filledSlotCount={filledSlotCount}
             mediaSlots={mediaSlots}
@@ -188,7 +177,7 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
             <>
               <SectionLabel
                 title="文案与内容"
-                description="标题、副标题和正文会直接进入实时预览与画布导出。"
+                description="直接进入预览与画布。"
               />
               {copySections.map((section) => (
                 <SectionCard
@@ -210,21 +199,30 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
             <>
               <SectionLabel
                 title="参数配置"
-                description="风格、提示词和生成控制项会影响后续素材生成与预览合成。"
+                description="影响素材生成和预览。"
               />
-              {settingSections.map((section) => (
-                <SectionCard
-                  key={section.id}
-                  section={section}
-                  cardType={section.cardType}
-                  state={uiState}
-                  onStateChange={onStateChange}
-                  onSlotUpload={onSlotUpload}
-                  onSlotGenerate={onSlotGenerate}
-                  onSlotRemoveBackground={onSlotRemoveBackground}
-                  disabled={isWorking}
-                />
-              ))}
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+                  gap: 2,
+                  alignItems: 'start',
+                }}
+              >
+                {settingSections.map((section) => (
+                  <SectionCard
+                    key={section.id}
+                    section={section}
+                    cardType={section.cardType}
+                    state={uiState}
+                    onStateChange={onStateChange}
+                    onSlotUpload={onSlotUpload}
+                    onSlotGenerate={onSlotGenerate}
+                    onSlotRemoveBackground={onSlotRemoveBackground}
+                    disabled={isWorking}
+                  />
+                ))}
+              </Box>
             </>
           ) : null}
         </Box>
@@ -244,16 +242,12 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
               boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)',
               display: 'flex',
               flexDirection: 'column',
+              borderRadius: 3,
             }}
           >
             <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0 }}>
               <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                <Box>
-                  <Typography variant="h6">实时预览</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    右侧预览与进入画布的数据保持一致
-                  </Typography>
-                </Box>
+                <Typography variant="h6">实时预览</Typography>
                 <Stack direction="row" spacing={1} alignItems="center">
                   {previewError ? <Chip label="最近同步失败" size="small" color="warning" /> : null}
                   <Chip label={previewItemsCount ? `已生成 ${previewItemsCount} 层` : '占位预览'} size="small" />
@@ -286,7 +280,7 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
               {textLayers.length ? (
                 <Card variant="outlined">
                   <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    <Typography variant="subtitle2">将导出到画布的文字层</Typography>
+                    <Typography variant="subtitle2">导出文字</Typography>
                     {textLayers.map((layer) => (
                       <Box key={layer.id}>
                         <Typography variant="caption" color="text.secondary">
@@ -298,13 +292,11 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
                   </CardContent>
                 </Card>
               ) : (
-                <Alert severity="info">当前没有可导出到画布的文字层。只有标题/副标题/文案类字段会进入画布。</Alert>
+                <Alert severity="info">当前没有导出文字。</Alert>
               )}
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-                <Typography variant="body2" color="text.secondary">
-                  未点击“进入画布”前，右侧始终显示当前配置的最新结果；同步中会继续保留最近一次成功预览。
-                </Typography>
+                <Chip label="预览自动同步" size="small" variant="outlined" />
                 <Button variant="contained" onClick={onEnterCanvas} disabled={enterCanvasDisabled}>
                   进入画布
                 </Button>
@@ -330,15 +322,15 @@ const SectionLabel: React.FC<{
 }> = ({ title, description }) => (
   <Box
     sx={{
-      px: 1.5,
-      py: 1.25,
+      px: 1.25,
+      py: 0.9,
       borderRadius: 2,
-      border: '1px solid',
-      borderColor: 'rgba(25, 118, 210, 0.18)',
-      background: 'linear-gradient(180deg, rgba(239,246,255,0.92) 0%, rgba(255,255,255,0.96) 100%)',
+      borderLeft: '3px solid',
+      borderColor: 'rgba(25, 118, 210, 0.36)',
+      background: 'rgba(248, 250, 252, 0.88)',
     }}
   >
-    <Typography variant="h6">{title}</Typography>
+    <Typography variant="subtitle1">{title}</Typography>
     <Typography variant="caption" color="text.secondary">
       {description}
     </Typography>
@@ -349,8 +341,6 @@ type SceneSetupCardProps = {
   materialsSection?: LayoutSection;
   uiState: Record<string, any>;
   sceneDraft?: SceneDraft;
-  generatedPrompt: string;
-  selectedOptions: Record<string, string[]>;
   layerPlan: any;
   filledSlotCount: number;
   mediaSlots: MediaSlot[];
@@ -367,8 +357,6 @@ const SceneSetupCard: React.FC<SceneSetupCardProps> = ({
   materialsSection,
   uiState,
   sceneDraft,
-  generatedPrompt,
-  selectedOptions,
   layerPlan,
   filledSlotCount,
   mediaSlots,
@@ -389,17 +377,15 @@ const SceneSetupCard: React.FC<SceneSetupCardProps> = ({
       sx={{
         boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)',
         borderRadius: 3,
-        border: '1px solid rgba(25, 118, 210, 0.14)',
-        background: 'linear-gradient(180deg, rgba(248,252,255,0.98) 0%, rgba(255,255,255,1) 100%)',
+        border: '1px solid rgba(15, 23, 42, 0.08)',
+        background: 'linear-gradient(180deg, rgba(250,252,255,0.98) 0%, rgba(255,255,255,1) 100%)',
       }}
     >
-      <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between">
           <Box>
-            <Typography variant="h6">素材准备与场景总览</Typography>
-            <Typography variant="caption" color="text.secondary">
-              先确认整体方向，再横向处理每个图层素材。
-            </Typography>
+            <Typography variant="h6">素材与总览</Typography>
+            <Typography variant="caption" color="text.secondary">先看整体，再处理图层。</Typography>
           </Box>
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
             <Chip label={`素材 ${filledSlotCount}/${mediaSlots.length}`} size="small" />
@@ -415,32 +401,10 @@ const SceneSetupCard: React.FC<SceneSetupCardProps> = ({
 
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           {sceneDraft?.brief?.aspect_ratio ? <Chip label={`画幅 ${sceneDraft.brief.aspect_ratio}`} size="small" /> : null}
-          {sceneDraft?.materials?.slots?.length ? <Chip label={`规划素材 ${sceneDraft.materials.slots.length}`} size="small" /> : null}
+          {sceneDraft?.materials?.slots?.length ? <Chip label={`${sceneDraft.materials.slots.length} 个图层`} size="small" /> : null}
           <Chip label={`文案字段 ${copyReadyCount}/3`} size="small" />
+          {layerPlan?.estimated_time_seconds ? <Chip label={`约 ${layerPlan.estimated_time_seconds}s`} size="small" variant="outlined" /> : null}
         </Stack>
-
-        {generatedPrompt ? (
-          <TextField
-            value={generatedPrompt}
-            fullWidth
-            multiline
-            minRows={2}
-            label="系统提示（只读）"
-            InputProps={{ readOnly: true }}
-          />
-        ) : null}
-
-        {Object.keys(selectedOptions).length ? (
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            {Object.entries(selectedOptions).flatMap(([key, values]) =>
-              values.map((value) => (
-                <Chip key={`${key}:${value}`} label={`${key}: ${value}`} size="small" />
-              )),
-            )}
-          </Stack>
-        ) : null}
-
-        {layerPlan ? <LayerPlanPanel layerPlan={layerPlan} /> : null}
 
         {componentId ? (
           <HorizontalMaterialsStrip
@@ -483,9 +447,7 @@ const HorizontalMaterialsStrip: React.FC<HorizontalMaterialsStripProps> = ({
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
       <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
         <Typography variant="subtitle2">图层素材</Typography>
-        <Typography variant="caption" color="text.secondary">
-          可横向滑动浏览所有图层
-        </Typography>
+        <Chip label="可横向滑动" size="small" variant="outlined" />
       </Stack>
       <Box sx={{ overflowX: 'auto', overflowY: 'visible', pb: 1 }}>
         <Box sx={{ display: 'flex', gap: 2, minWidth: 'max-content' }}>
@@ -543,11 +505,12 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
     <Card
       variant="outlined"
       sx={{
-        width: 320,
-        flex: '0 0 320px',
-        borderRadius: 2,
+        width: 304,
+        flex: '0 0 304px',
+        borderRadius: 2.5,
         borderColor: 'rgba(15, 23, 42, 0.12)',
-        backgroundColor: '#fff',
+        background: 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(248,250,252,1) 100%)',
+        boxShadow: '0 8px 22px rgba(15, 23, 42, 0.06)',
       }}
     >
       <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
@@ -557,9 +520,7 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
               {slot.label}
             </Typography>
             <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-              <Typography variant="caption" color="text.secondary">
-                {slot.layerType}
-              </Typography>
+              <Chip size="small" label={formatLayerType(slot.layerType)} variant="outlined" />
               {expectsTransparent ? (
                 <Chip
                   size="small"
@@ -596,14 +557,14 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
         </Stack>
 
         <TextField
-          label="该图层提示词"
+          label="提示词"
           value={slot.prompt || ''}
           onChange={(event) => updateSlot((prev) => ({ ...prev, prompt: event.target.value }))}
           fullWidth
           multiline
           minRows={3}
           disabled={disabled}
-          helperText={expectsTransparent ? '主体/装饰层优先按透明底生成。' : '背景层建议写完整场景、景深和光影。'}
+          helperText={expectsTransparent ? '优先透明底。' : '写完整场景。'}
         />
 
         <Box
@@ -626,7 +587,7 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
             />
           ) : (
             <Typography variant="body2" color="text.secondary">
-              未准备素材
+              暂无素材
             </Typography>
           )}
         </Box>
