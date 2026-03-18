@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Backdrop,
   Box,
   Button,
   Card,
   CardContent,
   Chip,
   Container,
+  CircularProgress,
   IconButton,
   LinearProgress,
   Paper,
@@ -24,7 +26,9 @@ import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
-import { SectionCard, type LayoutConfig, type LayoutSection, type MediaSlot } from './dynamic/DynamicRenderer';
+import { type LayoutConfig, type LayoutSection, type MediaSlot } from './dynamic/DynamicRenderer';
+import SceneEditWorkspace from './edit/SceneEditWorkspace';
+import { type SceneDraft, type SceneMaterialDraftSlot } from './edit/sceneDraft';
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
@@ -53,6 +57,13 @@ type AnswerState = {
 type LayoutPayload = {
   layout_config?: any;
   layoutConfig?: any;
+  layer_plan?: any;
+  layerPlan?: any;
+  draft?: Partial<SceneDraft> & {
+    controls?: Partial<SceneDraft['controls']> & {
+      positivePrompt?: string;
+    };
+  };
   text_response?: string;
   textResponse?: string;
 };
@@ -62,10 +73,25 @@ type StatusState = {
   message: string;
 };
 
+type TextLayerDraft = {
+  id: string;
+  name: string;
+  text: string;
+  role: 'title' | 'subtitle' | 'body';
+  color?: string;
+  align?: 'left' | 'center' | 'right';
+};
+
+type PreviewComposition = {
+  layers: any[];
+  canvasWidth: number;
+  canvasHeight: number;
+  updatedAt: number;
+};
+
 const CANVAS_DIMENSION = 4000;
 const TARGET_BG_WIDTH = 2400;
 const FLOW_STEPS = ['对话澄清', '编辑与素材', '预览入画布'];
-const DASHBOARD_MIN_CARD = 280;
 const GRID_BREAKPOINTS = { lg: 1200, md: 900, sm: 600, xs: 0 };
 const GRID_COLS = { lg: 12, md: 8, sm: 6, xs: 4 };
 const GRID_ROW_HEIGHT = 32;
@@ -94,18 +120,29 @@ const SceneFlowPage: React.FC = () => {
   const messagesRef = useRef<ChatMessage[]>([]);
   const answersRef = useRef<Record<string, AnswerState>>({});
   const questionListRef = useRef<QuestionItem[]>([]);
+  const previewRequestRef = useRef(0);
 
   const [layoutConfig, setLayoutConfig] = useState<LayoutConfig | undefined>(undefined);
+  const [layerPlan, setLayerPlan] = useState<any>(null);
+  const [sceneDraft, setSceneDraft] = useState<SceneDraft | undefined>(undefined);
   const [generatedPrompt, setGeneratedPrompt] = useState('');
   const [isWorking, setIsWorking] = useState(false);
   const [uiState, setUiState] = useState<Record<string, any>>({});
   const [previewItems, setPreviewItems] = useState<any[]>([]);
+  const [previewComposition, setPreviewComposition] = useState<PreviewComposition | null>(null);
+  const [isPreviewSyncing, setIsPreviewSyncing] = useState(false);
+  const [previewError, setPreviewError] = useState('');
 
   const [quickPrompt, setQuickPrompt] = useState('');
   const [quickImage, setQuickImage] = useState<string | null>(null);
   const [quickStatus, setQuickStatus] = useState<StatusState>({ type: 'idle', message: '' });
   const [quickLoading, setQuickLoading] = useState(false);
   const [step1Rows, setStep1Rows] = useState(0);
+
+  const effectiveLayoutConfig = useMemo(
+    () => ensureStableEditSections(layoutConfig, layerPlan, sceneDraft),
+    [layoutConfig, layerPlan, sceneDraft],
+  );
 
   const questionContext = useMemo(() => {
     const map = new Map<string, QuestionItem>();
@@ -158,35 +195,46 @@ const SceneFlowPage: React.FC = () => {
   }, [messages]);
 
   const aspectRatio = useMemo(() => {
-    const ratioField = layoutConfig?.meta?.aspect_ratio_field;
+    const ratioField = effectiveLayoutConfig?.meta?.aspect_ratio_field;
     const fromUi = ratioField ? uiState?.[ratioField] : undefined;
     const fromSelected = selectedOptions['画幅比例']?.[0];
-    const fromMeta = layoutConfig?.meta?.aspect_ratio;
+    const fromMeta = effectiveLayoutConfig?.meta?.aspect_ratio;
     return fromUi || fromSelected || fromMeta || '3:4';
-  }, [layoutConfig?.meta?.aspect_ratio, layoutConfig?.meta?.aspect_ratio_field, selectedOptions, uiState]);
+  }, [effectiveLayoutConfig?.meta?.aspect_ratio, effectiveLayoutConfig?.meta?.aspect_ratio_field, selectedOptions, uiState]);
 
   const mediaSlots = useMemo(
-    () => extractMediaSlots(layoutConfig, uiState),
-    [layoutConfig, uiState],
+    () => extractMediaSlots(effectiveLayoutConfig, uiState),
+    [effectiveLayoutConfig, uiState],
   );
-  const activeStep = previewItems.length ? 2 : layoutConfig ? 1 : 0;
+  const textLayers = useMemo(
+    () => collectTextLayers(effectiveLayoutConfig, uiState, selectedOptions),
+    [effectiveLayoutConfig, selectedOptions, uiState],
+  );
+  const activeStep = previewComposition ? 2 : effectiveLayoutConfig ? 1 : 0;
 
   useEffect(() => {
-    if (!layoutConfig) return;
+    if (!effectiveLayoutConfig) return;
     setUiState((prev) => {
-      if (Object.keys(prev || {}).length > 0) {
+      const defaults = buildSceneUiState(effectiveLayoutConfig, sceneDraft);
+      if (!Object.keys(defaults).length) {
         return prev;
       }
-      return initializeUiState(layoutConfig);
+      const next = { ...defaults, ...prev };
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => prev[key] === next[key])) {
+        return prev;
+      }
+      return next;
     });
-  }, [layoutConfig]);
+  }, [effectiveLayoutConfig, sceneDraft]);
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
   useEffect(() => {
-    if (layoutConfig) return;
+    if (effectiveLayoutConfig) return;
     const el = gridContainerRef.current;
     if (!el) return;
     const updateRows = () => {
@@ -201,7 +249,7 @@ const SceneFlowPage: React.FC = () => {
     const observer = new ResizeObserver(updateRows);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [layoutConfig]);
+  }, [effectiveLayoutConfig]);
 
   useEffect(() => {
     answersRef.current = answers;
@@ -210,6 +258,149 @@ const SceneFlowPage: React.FC = () => {
   useEffect(() => {
     questionListRef.current = questionList;
   }, [questionList]);
+
+  const buildPendingItemsFromComposition = useCallback(
+    (composition: PreviewComposition) => {
+      const bgSlot = mediaSlots.find((s) => s.layerType === 'background');
+      const bgUri = bgSlot?.uri;
+      const bgW = composition.canvasWidth;
+      const bgH = composition.canvasHeight;
+      const paletteColor = findPrimaryColor(effectiveLayoutConfig, uiState) || '#111827';
+
+      const pending: any[] = [];
+      const backgroundDataUrl =
+        bgUri ?? buildPlaceholderDataUrl(`background:${generatedPrompt || ''}`, bgW, bgH);
+      pending.push({
+        kind: 'image',
+        dataUrl: backgroundDataUrl,
+        name: '背景',
+        ...mapToCanvas({
+          x: 0,
+          y: 0,
+          width: bgW,
+          height: bgH,
+          zIndex: 0,
+          bgW,
+          bgH,
+        }),
+      });
+
+      composition.layers.forEach((layer: any) => {
+        const placement = layer.placement || {};
+        const mapped = mapToCanvas({
+          x: placement.x ?? 0,
+          y: placement.y ?? 0,
+          width: layer.width ?? 512,
+          height: layer.height ?? 512,
+          zIndex: placement.z_index ?? 1,
+          bgW,
+          bgH,
+        });
+        if ((layer.kind || 'image') === 'image') {
+          const dataUrl = layer.image_base64?.startsWith('data:')
+            ? layer.image_base64
+            : `data:image/png;base64,${layer.image_base64}`;
+          pending.push({
+            kind: 'image',
+            dataUrl,
+            name: layer.name || layer.id || '图层',
+            ...mapped,
+          });
+          return;
+        }
+        pending.push({
+          kind: layer.kind,
+          name: layer.name || layer.id || '图层',
+          text: layer.text,
+          style: {
+            color: layer.style?.color || paletteColor,
+            fontSize: layer.style?.fontSize,
+            fontWeight: layer.style?.fontWeight,
+            align: layer.style?.align,
+            backgroundColor: layer.style?.backgroundColor,
+            padding: layer.style?.padding,
+            lineHeight: layer.style?.lineHeight,
+            fill: layer.style?.fill,
+            radius: layer.style?.radius,
+          },
+          ...mapped,
+        });
+      });
+      return pending;
+    },
+    [effectiveLayoutConfig, generatedPrompt, mediaSlots, uiState],
+  );
+
+  const syncPreviewComposition = useCallback(
+    async (reason: 'auto' | 'manual' = 'auto') => {
+      if (!effectiveLayoutConfig) return null;
+      const requestId = previewRequestRef.current + 1;
+      previewRequestRef.current = requestId;
+      setIsPreviewSyncing(true);
+      setPreviewError('');
+
+      const materials = mediaSlots
+        .filter((slot) => slot.layerType !== 'background')
+        .map((slot) => ({
+          id: slot.id,
+          name: slot.label,
+          layer_type: slot.layerType,
+          image_base64: slot.uri ? extractBase64(slot.uri) : undefined,
+        }));
+
+      try {
+        const backgroundSize = resolveSizeForSlot(true, aspectRatio);
+        const response = await api.post('/scene/preview', {
+          aspect_ratio: aspectRatio,
+          materials,
+          text_layers: textLayers,
+          text_panel_fill: 'rgba(255,255,255,0.78)',
+        });
+
+        const nextComposition: PreviewComposition = {
+          layers: Array.isArray(response.data?.layers) ? response.data.layers : [],
+          canvasWidth: Number(response.data?.canvas_width) || backgroundSize.width,
+          canvasHeight: Number(response.data?.canvas_height) || backgroundSize.height,
+          updatedAt: Date.now(),
+        };
+
+        if (previewRequestRef.current !== requestId) return null;
+        setPreviewComposition(nextComposition);
+        setPreviewItems(buildPendingItemsFromComposition(nextComposition));
+        if (reason === 'manual') {
+          setStatus({ type: 'success', message: '预览已同步，可进入画布。' });
+        }
+        return nextComposition;
+      } catch (error) {
+        if (previewRequestRef.current === requestId) {
+          setPreviewError(toApiErrorMessage(error, '实时预览同步失败。'));
+          if (reason === 'manual') {
+            setStatus({ type: 'error', message: toApiErrorMessage(error, '生成预览失败。') });
+          }
+        }
+        return null;
+      } finally {
+        if (previewRequestRef.current === requestId) {
+          setIsPreviewSyncing(false);
+        }
+      }
+    },
+    [aspectRatio, buildPendingItemsFromComposition, effectiveLayoutConfig, mediaSlots, textLayers],
+  );
+
+  useEffect(() => {
+    if (!effectiveLayoutConfig) {
+      setPreviewComposition(null);
+      setPreviewItems([]);
+      setPreviewError('');
+      setIsPreviewSyncing(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void syncPreviewComposition('auto');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [effectiveLayoutConfig, mediaSlots, textLayers, aspectRatio, syncPreviewComposition]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -399,24 +590,30 @@ const SceneFlowPage: React.FC = () => {
     setPreviewItems([]);
 
     try {
-      const [layoutRes] = await Promise.all([
-        api.post('/generate-layout', {
-          prompt: initialPrompt,
-          chat_history: chatHistory,
-          selected_options: selectedOptions,
-        }),
-        api.post('/analyze-layer-plan', {
-          chat_history: chatHistory,
-          selected_options: selectedOptions,
-          ui_state: {},
-        }),
-      ]);
+      const planRes = await api.post('/scene/plan', {
+        prompt: initialPrompt,
+        chat_history: chatHistory,
+        selected_options: selectedOptions,
+      });
 
-      const layoutPayload: LayoutPayload = layoutRes.data;
+      const layoutPayload: LayoutPayload = planRes.data;
       const nextLayout = layoutPayload.layout_config ?? layoutPayload.layoutConfig;
+      const nextDraft = normalizeSceneDraft(layoutPayload.draft, initialPrompt, selectedOptions);
+      const nextLayerPlan = layoutPayload.layer_plan ?? layoutPayload.layerPlan ?? null;
       setLayoutConfig(nextLayout);
-      setGeneratedPrompt(layoutPayload.text_response ?? layoutPayload.textResponse ?? '');
-      setUiState(initializeUiState(nextLayout));
+      setLayerPlan(nextLayerPlan);
+      setSceneDraft(nextDraft);
+      setGeneratedPrompt(
+        nextDraft.controls.positive_prompt ??
+          layoutPayload.draft?.controls?.positivePrompt ??
+          layoutPayload.text_response ??
+          layoutPayload.textResponse ??
+          '',
+      );
+      setUiState(buildSceneUiState(ensureStableEditSections(nextLayout, nextLayerPlan, nextDraft), nextDraft));
+      setPreviewComposition(null);
+      setPreviewItems([]);
+      setPreviewError('');
       setStatus({ type: 'success', message: '编辑界面已就绪，开始准备素材吧。' });
     } catch (error) {
       let message = '生成编辑界面失败。';
@@ -452,7 +649,11 @@ const SceneFlowPage: React.FC = () => {
     async (componentId: string, slotId: string, file: File) => {
       if (!file.type.startsWith('image/')) return;
       const dataUrl = await fileToDataUrl(file);
-      updateSlot(componentId, slotId, (slot) => ({ ...slot, uri: dataUrl }));
+      updateSlot(componentId, slotId, (slot) => ({
+        ...slot,
+        uri: dataUrl,
+        hasTransparentBg: slot.layerType === 'background' ? false : detectAlphaFromDataUrl(dataUrl),
+      }));
     },
     [updateSlot],
   );
@@ -464,16 +665,25 @@ const SceneFlowPage: React.FC = () => {
       try {
         const isBackground = slot.layerType === 'background';
         const size = resolveSizeForSlot(isBackground, aspectRatio);
-        const imgRes = await api.post('/generate-image', {
+        const imgRes = await api.post('/scene/materials/generate', {
           prompt: slot.prompt,
           width: size.width,
           height: size.height,
+          layer_type: slot.layerType,
+          transparent_background: !isBackground,
         });
         const base64 = imgRes.data?.image_base64;
         if (!base64) throw new Error('未返回图片数据');
         const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
-        updateSlot(componentId, slot.id, (prev) => ({ ...prev, uri: dataUrl }));
-        setStatus({ type: 'success', message: '素材生成完成。' });
+        updateSlot(componentId, slot.id, (prev) => ({
+          ...prev,
+          uri: dataUrl,
+          hasTransparentBg: Boolean(imgRes.data?.transparent_background || !isBackground),
+        }));
+        setStatus({
+          type: 'success',
+          message: resolveImageGenerationStatusMessage(imgRes.data, '素材生成完成。'),
+        });
       } catch (error) {
         const msg = toApiErrorMessage(error, '生成素材失败。');
         setStatus({ type: 'error', message: msg });
@@ -486,12 +696,12 @@ const SceneFlowPage: React.FC = () => {
   );
 
   const handleGenerateAllSlots = useCallback(async () => {
-    if (!layoutConfig) {
+    if (!effectiveLayoutConfig) {
       setStatus({ type: 'error', message: '请先生成编辑界面。' });
       return;
     }
     const ownerMap = new Map<string, string>();
-    (layoutConfig.sections ?? []).forEach((section) => {
+    (effectiveLayoutConfig.sections ?? []).forEach((section) => {
       (section.components ?? []).forEach((component) => {
         if (component.type === 'media-uploader') {
           const stateSlots = uiState[component.id];
@@ -511,6 +721,7 @@ const SceneFlowPage: React.FC = () => {
     }
 
     setIsWorking(true);
+    let fallbackCount = 0;
     try {
       for (let i = 0; i < slotsToGenerate.length; i += 1) {
         const slot = slotsToGenerate[i];
@@ -524,19 +735,34 @@ const SceneFlowPage: React.FC = () => {
         });
         const isBackground = slot.layerType === 'background';
         const size = resolveSizeForSlot(isBackground, aspectRatio);
-        const imgRes = await api.post('/generate-image', {
+        const imgRes = await api.post('/scene/materials/generate', {
           prompt: slot.prompt,
           width: size.width,
           height: size.height,
+          layer_type: slot.layerType,
+          transparent_background: !isBackground,
         });
         const base64 = imgRes.data?.image_base64;
         if (!base64) {
           throw new Error('未返回图片数据');
         }
+        if (imgRes.data?.fallback_used) {
+          fallbackCount += 1;
+        }
         const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
-        updateSlot(componentId, slot.id, (prev) => ({ ...prev, uri: dataUrl }));
+        updateSlot(componentId, slot.id, (prev) => ({
+          ...prev,
+          uri: dataUrl,
+          hasTransparentBg: Boolean(imgRes.data?.transparent_background || !isBackground),
+        }));
       }
-      setStatus({ type: 'success', message: `批量生成完成（${slotsToGenerate.length} 个）。` });
+      setStatus({
+        type: 'success',
+        message:
+          fallbackCount > 0
+            ? `批量生成完成（${slotsToGenerate.length} 个，其中 ${fallbackCount} 个使用占位图）。`
+            : `批量生成完成（${slotsToGenerate.length} 个）。`,
+      });
     } catch (error) {
       const msg = toApiErrorMessage(error, '批量生成失败。');
       setStatus({ type: 'error', message: msg });
@@ -544,7 +770,7 @@ const SceneFlowPage: React.FC = () => {
     } finally {
       setIsWorking(false);
     }
-  }, [aspectRatio, layoutConfig, mediaSlots, uiState, updateSlot]);
+  }, [aspectRatio, effectiveLayoutConfig, mediaSlots, uiState, updateSlot]);
 
   const handleSlotRemoveBackground = useCallback(
     async (componentId: string, slot: MediaSlot) => {
@@ -574,81 +800,25 @@ const SceneFlowPage: React.FC = () => {
     [updateSlot],
   );
 
-  const handleGeneratePreviewToCanvas = useCallback(async () => {
+  const handleEnterCanvas = useCallback(async () => {
     setIsWorking(true);
-    setStatus({ type: 'loading', message: '正在组装预览...' });
+    setStatus({ type: 'loading', message: '正在同步当前预览并进入画布...' });
     try {
-      const materials = mediaSlots
-        .filter((s) => s.layerType !== 'background')
-        .map((s) => ({
-          name: s.label,
-          layer_type: s.layerType,
-          image_base64: s.uri ? extractBase64(s.uri) : undefined,
-        }));
-
-      const res = await api.post('/compose-materials', {
-        aspect_ratio: aspectRatio,
-        materials,
-      });
-      const layers = res.data?.layers || [];
-      if (!Array.isArray(layers) || layers.length === 0) {
-        throw new Error('组装接口未返回图层');
+      const latest = await syncPreviewComposition('manual');
+      const items = latest ? buildPendingItemsFromComposition(latest) : previewItems;
+      if (!items.length) {
+        throw new Error('当前没有可导入画布的预览结果。');
       }
-
-      const bgSlot = mediaSlots.find((s) => s.layerType === 'background');
-      const bgUri = bgSlot?.uri;
-      const bgW = 768;
-      const bgH = Math.round(768 / parseAspectRatio(aspectRatio));
-
-      const pendingItems: any[] = [];
-      {
-        const dataUrl =
-          bgUri ??
-          buildPlaceholderDataUrl(`background:${generatedPrompt || ''}`, bgW, bgH);
-        const bgPlacement = mapToCanvas({
-          x: 0,
-          y: 0,
-          width: bgW,
-          height: bgH,
-          zIndex: 0,
-          bgW,
-          bgH,
-        });
-        pendingItems.push({ dataUrl, name: '背景', ...bgPlacement });
-      }
-
-      layers.forEach((layer: any) => {
-        const dataUrl = layer.image_base64?.startsWith('data:')
-          ? layer.image_base64
-          : `data:image/png;base64,${layer.image_base64}`;
-        const placement = layer.placement || {};
-        const mapped = mapToCanvas({
-          x: placement.x ?? 0,
-          y: placement.y ?? 0,
-          width: layer.width ?? 512,
-          height: layer.height ?? 512,
-          zIndex: placement.z_index ?? 1,
-          bgW,
-          bgH,
-        });
-        pendingItems.push({
-          dataUrl,
-          name: layer.name || layer.id || '图层',
-          ...mapped,
-        });
-      });
-
-      sessionStorage.setItem('pendingCanvasItems', JSON.stringify(pendingItems));
-      setPreviewItems(pendingItems);
-      setStatus({ type: 'success', message: '预览完成，可进入画布。' });
+      sessionStorage.setItem('pendingCanvasItems', JSON.stringify(items));
+      navigate('/canvas');
     } catch (error) {
-      const msg = toApiErrorMessage(error, '生成预览失败。');
+      const msg = toApiErrorMessage(error, '进入画布失败。');
       setStatus({ type: 'error', message: msg });
       window.alert(msg);
     } finally {
       setIsWorking(false);
     }
-  }, [aspectRatio, generatedPrompt, mediaSlots]);
+  }, [buildPendingItemsFromComposition, navigate, previewItems, syncPreviewComposition]);
 
   const handleQuickGenerate = useCallback(async () => {
     const prompt = quickPrompt.trim();
@@ -665,7 +835,10 @@ const SceneFlowPage: React.FC = () => {
       if (!base64) throw new Error('未返回图片数据');
       const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
       setQuickImage(dataUrl);
-      setQuickStatus({ type: 'success', message: '快速图像已生成。' });
+      setQuickStatus({
+        type: 'success',
+        message: resolveImageGenerationStatusMessage(res.data, '快速图像已生成。'),
+      });
     } catch (error) {
       const msg = toApiErrorMessage(error, '快速生成失败。');
       setQuickStatus({ type: 'error', message: msg });
@@ -689,14 +862,6 @@ const SceneFlowPage: React.FC = () => {
     sessionStorage.setItem('pendingCanvasItems', JSON.stringify(pendingItems));
     navigate('/canvas');
   }, [navigate, quickImage]);
-
-  const handleGoCanvas = useCallback(() => {
-    if (!previewItems.length) {
-      setStatus({ type: 'error', message: '请先生成预览。' });
-      return;
-    }
-    navigate('/canvas');
-  }, [navigate, previewItems.length]);
 
   const handleConfirmMultiQuestion = useCallback(
     (question: QuestionItem) => {
@@ -840,63 +1005,36 @@ const SceneFlowPage: React.FC = () => {
     );
   };
 
-  const previewData = useMemo(() => {
-    const bgSlot = mediaSlots.find((slot) => slot.layerType === 'background');
-    const subjects = mediaSlots.filter((slot) => slot.layerType !== 'background');
-    return { bgSlot, subjects };
-  }, [mediaSlots]);
-  const filledSlotCount = useMemo(() => mediaSlots.filter((slot) => slot.uri).length, [mediaSlots]);
-
-  const layoutMeta = useMemo(() => (layoutConfig?.meta ?? {}).layout ?? {}, [layoutConfig]);
   const layoutSections = useMemo(
-    () => (layoutConfig?.sections ?? []).filter((section) => !isReservedSection(section)),
-    [layoutConfig],
+    () => (effectiveLayoutConfig?.sections ?? []).filter((section) => !isReservedSection(section)),
+    [effectiveLayoutConfig],
   );
-  const layoutColumns = Math.max(1, Math.floor(coerceNumber(layoutMeta.columns) ?? 5));
+  const materialsSection = useMemo(
+    () => layoutSections.find((section) => (section.components ?? []).some((component) => component.type === 'media-uploader')),
+    [layoutSections],
+  );
+  const configSections = useMemo(
+    () => layoutSections.filter((section) => section.id !== materialsSection?.id),
+    [layoutSections, materialsSection?.id],
+  );
   const layouts = useMemo<Layouts>(() => {
-    const sections = layoutSections;
-    const spanToWidth = (cols: number, span: number) => {
-      const colUnit = Math.max(1, Math.floor(cols / layoutColumns));
-      return Math.min(cols, Math.max(1, span * colUnit));
-    };
     const buildForCols = (cols: number) => {
       const items: LayoutItemSpec[] = [];
       const isSingleColumn = cols <= GRID_COLS.sm;
       const step1Height = Math.max(10, step1Rows || 12);
 
-      if (!layoutConfig) {
-        if (isSingleColumn) {
-          items.push({ i: 'chat', w: cols, h: step1Height });
-          items.push({ i: 'form', w: cols, h: step1Height });
-        } else {
-          const chatWidth = Math.max(1, Math.round((cols * 2) / 3));
-          const formWidth = Math.max(1, cols - chatWidth);
-          items.push({ i: 'chat', w: chatWidth, h: step1Height });
-          items.push({ i: 'form', w: formWidth, h: step1Height });
-        }
+      if (isSingleColumn) {
+        items.push({ i: 'chat', w: cols, h: step1Height });
+        items.push({ i: 'form', w: cols, h: step1Height });
       } else {
-        const majorSpan = Math.min(2, layoutColumns);
-        items.push({ i: 'chat', w: spanToWidth(cols, majorSpan), h: 12 });
-        items.push({ i: 'form', w: spanToWidth(cols, 1), h: 7 });
-        items.push({ i: 'summary', w: spanToWidth(cols, majorSpan), h: 4 });
-        sections.forEach((section) => {
-          const span = Math.max(1, Math.floor(coerceNumber(section.layout?.span) ?? 1));
-          items.push({
-            i: `section-${section.id}`,
-            w: spanToWidth(cols, Math.min(span, layoutColumns)),
-            h: estimateSectionHeight(section),
-          });
-        });
-        items.push({ i: 'preview', w: spanToWidth(cols, majorSpan), h: 10 });
+        const chatWidth = Math.max(1, Math.round((cols * 2) / 3));
+        const formWidth = Math.max(1, cols - chatWidth);
+        items.push({ i: 'chat', w: chatWidth, h: step1Height });
+        items.push({ i: 'form', w: formWidth, h: step1Height });
       }
 
       if (showQuick) {
-        const quickWidth =
-          !layoutConfig && isSingleColumn
-            ? cols
-            : !layoutConfig
-              ? Math.max(1, cols - Math.max(1, Math.round((cols * 2) / 3)))
-              : spanToWidth(cols, 1);
+        const quickWidth = isSingleColumn ? cols : Math.max(1, cols - Math.max(1, Math.round((cols * 2) / 3)));
         items.push({ i: 'quick', w: quickWidth, h: 7 });
       }
 
@@ -908,53 +1046,42 @@ const SceneFlowPage: React.FC = () => {
       sm: buildForCols(GRID_COLS.sm),
       xs: buildForCols(GRID_COLS.xs),
     };
-  }, [layoutColumns, layoutConfig, layoutSections, showQuick]);
+  }, [showQuick, step1Rows]);
 
-  const actionDisabled = isSending || isWorking;
-  const actionBar = useMemo(() => {
-    if (!layoutConfig) {
-      return (
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Button variant="contained" onClick={handleGenerateEdit} disabled={isSending}>
-            生成编辑界面
-          </Button>
-          <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={isSending}>
-            {showQuick ? '隐藏快速模式' : '快速模式'}
-          </Button>
-        </Stack>
-      );
-    }
+  const previewCanvasWidth = previewComposition?.canvasWidth || resolveSizeForSlot(true, aspectRatio).width;
+  const previewCanvasHeight = previewComposition?.canvasHeight || resolveSizeForSlot(true, aspectRatio).height;
+  if (effectiveLayoutConfig) {
     return (
-      <Stack direction="row" spacing={1} alignItems="center">
-        <Button
-          variant="contained"
-          onClick={handleGeneratePreviewToCanvas}
-          disabled={actionDisabled}
-        >
-          生成预览
-        </Button>
-        <Button
-          variant="outlined"
-          onClick={handleGoCanvas}
-          disabled={actionDisabled || !previewItems.length}
-        >
-          进入画布
-        </Button>
-        <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={actionDisabled}>
-          {showQuick ? '隐藏快速模式' : '快速模式'}
-        </Button>
-      </Stack>
+      <SceneEditWorkspace
+        activeStep={activeStep}
+        flowSteps={FLOW_STEPS}
+        status={status}
+        isWorking={isWorking}
+        isPreviewSyncing={isPreviewSyncing}
+        previewError={previewError}
+        previewComposition={previewComposition}
+        previewItemsCount={previewItems.length}
+        previewCanvasWidth={previewCanvasWidth}
+        previewCanvasHeight={previewCanvasHeight}
+        generatedPrompt={generatedPrompt}
+        selectedOptions={selectedOptions}
+        layerPlan={layerPlan}
+        sceneDraft={sceneDraft}
+        materialsSection={materialsSection}
+        configSections={configSections}
+        uiState={uiState}
+        mediaSlots={mediaSlots}
+        textLayers={textLayers}
+        onStateChange={handleStateChange}
+        onSlotUpload={handleSlotUpload}
+        onSlotGenerate={handleSlotGenerate}
+        onSlotRemoveBackground={handleSlotRemoveBackground}
+        onGenerateAllSlots={handleGenerateAllSlots}
+        onEnterCanvas={handleEnterCanvas}
+        enterCanvasDisabled={(isSending || isWorking) || isPreviewSyncing || !previewItems.length}
+      />
     );
-  }, [
-    actionDisabled,
-    handleGenerateEdit,
-    handleGeneratePreviewToCanvas,
-    handleGoCanvas,
-    isSending,
-    layoutConfig,
-    previewItems.length,
-    showQuick,
-  ]);
+  }
 
   return (
     <Container
@@ -1204,171 +1331,6 @@ const SceneFlowPage: React.FC = () => {
             </Card>
           </div>
 
-          {layoutConfig ? (
-            <div key="summary">
-              <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
-                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                  <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                    <Box>
-                      <Typography variant="h6">系统信息</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        结构总览与关键状态
-                      </Typography>
-                    </Box>
-                    <Chip label="编辑阶段" size="small" />
-                  </Stack>
-                  <Typography variant="body2" color="text.secondary">
-                    {layoutConfig.meta?.summary || '在下方配置素材，完成后生成预览。'}
-                  </Typography>
-                  {generatedPrompt ? (
-                    <TextField
-                      value={generatedPrompt}
-                      fullWidth
-                      multiline
-                      minRows={2}
-                      label="提示词（只读）"
-                      InputProps={{ readOnly: true }}
-                    />
-                  ) : null}
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Chip label={`图层 ${filledSlotCount}/${mediaSlots.length}`} size="small" />
-                    <Chip label={`预览 ${previewItems.length ? '已生成' : '未生成'}`} size="small" />
-                    <Chip label={`参数区 ${layoutSections.length}`} size="small" />
-                  </Stack>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={handleGenerateAllSlots}
-                      disabled={isWorking || !layoutConfig}
-                    >
-                      一键生成全部素材
-                    </Button>
-                    <Typography variant="caption" color="text.secondary">
-                      已有素材将自动跳过
-                    </Typography>
-                  </Stack>
-                </CardContent>
-              </Card>
-            </div>
-          ) : null}
-
-          {layoutConfig
-            ? layoutSections.map((section) => (
-                <div key={`section-${section.id}`}>
-                  <SectionCard
-                    section={section as LayoutSection}
-                    cardType={section.cardType}
-                    state={uiState}
-                    onStateChange={handleStateChange}
-                    onSlotUpload={handleSlotUpload}
-                    onSlotGenerate={handleSlotGenerate}
-                    onSlotRemoveBackground={handleSlotRemoveBackground}
-                    disabled={isWorking}
-                  />
-                </div>
-              ))
-            : null}
-
-          {layoutConfig ? (
-            <div key="preview">
-              <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
-                <CardContent
-                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, height: '100%', overflowY: 'auto' }}
-                >
-                  <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                    <Box>
-                      <Typography variant="h6">生图预览</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        素材与合成结果概览
-                      </Typography>
-                    </Box>
-                    <Chip label={previewItems.length ? `已生成 ${previewItems.length} 层` : '待生成'} size="small" />
-                  </Stack>
-
-                  <Box
-                    sx={{
-                      position: 'relative',
-                      width: '100%',
-                      borderRadius: 2,
-                      overflow: 'hidden',
-                      border: '1px solid',
-                      borderColor: 'grey.200',
-                      pb: `${100 / parseAspectRatio(aspectRatio)}%`,
-                      backgroundColor: '#f4f6f8',
-                    }}
-                  >
-                    <Box
-                      sx={{
-                        position: 'absolute',
-                        inset: 0,
-                        backgroundImage: previewData.bgSlot?.uri
-                          ? `url(${previewData.bgSlot.uri})`
-                          : `url(${buildPlaceholderDataUrl('background', 720, 480)})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                      }}
-                    />
-                    {previewData.subjects.slice(0, 4).map((slot, idx) => {
-                      const positions = [
-                        { left: '18%', top: '32%' },
-                        { left: '68%', top: '30%' },
-                        { left: '28%', top: '68%' },
-                        { left: '68%', top: '66%' },
-                      ];
-                      const position = positions[idx] || positions[0];
-                      return (
-                        <Box
-                          key={slot.id}
-                          sx={{
-                            position: 'absolute',
-                            width: '30%',
-                            aspectRatio: '1 / 1',
-                            left: position.left,
-                            top: position.top,
-                            transform: 'translate(-50%, -50%)',
-                            borderRadius: 1,
-                            overflow: 'hidden',
-                            border: '1px solid rgba(0,0,0,0.08)',
-                            backgroundColor: '#fff',
-                          }}
-                        >
-                          {slot.uri ? (
-                            <Box
-                              component="img"
-                              src={slot.uri}
-                              sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                            />
-                          ) : (
-                            <Box
-                              sx={{
-                                width: '100%',
-                                height: '100%',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontSize: 12,
-                                color: 'text.secondary',
-                              }}
-                            >
-                              未生成
-                            </Box>
-                          )}
-                        </Box>
-                      );
-                    })}
-                  </Box>
-
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    {Object.entries(selectedOptions).flatMap(([k, values]) =>
-                      values.map((v) => <Chip key={`${k}:${v}`} label={`${k}: ${v}`} size="small" />),
-                    )}
-                  </Stack>
-                </CardContent>
-              </Card>
-            </div>
-          ) : null}
-
           {showQuick ? (
             <div key="quick">
               <Card sx={{ height: '100%', boxShadow: '0 18px 40px rgba(15, 23, 42, 0.12)' }}>
@@ -1460,9 +1422,23 @@ const SceneFlowPage: React.FC = () => {
               </Typography>
             )}
           </Box>
-          <Box>{actionBar}</Box>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Button variant="contained" onClick={handleGenerateEdit} disabled={isSending}>
+              生成编辑界面
+            </Button>
+            <Button variant="text" onClick={() => setShowQuick((prev) => !prev)} disabled={isSending}>
+              {showQuick ? '隐藏快速模式' : '快速模式'}
+            </Button>
+          </Stack>
         </Paper>
       </Box>
+
+      <Backdrop open={isWorking} sx={{ zIndex: (theme) => theme.zIndex.drawer + 10, color: '#fff' }}>
+        <Stack spacing={2} alignItems="center">
+          <CircularProgress color="inherit" />
+          <Typography variant="body2">{status.message || '处理中...'}</Typography>
+        </Stack>
+      </Backdrop>
     </Container>
   );
 };
@@ -1700,20 +1676,514 @@ function packGridItems(items: LayoutItemSpec[], cols: number): Layout[] {
   });
 }
 
-function estimateSectionHeight(section: LayoutSection): number {
-  const components = section.components ?? [];
-  const types = components.map((comp) => comp.type);
-  if (types.includes('media-uploader')) return 10;
-  if (types.includes('prompt-editor')) return 8;
-  if (components.length >= 5) return 7;
-  if (components.length >= 3) return 6;
-  return 5;
+function ensureStableEditSections(
+  layoutConfig: LayoutConfig | undefined,
+  layerPlan: any,
+  sceneDraft?: SceneDraft,
+): LayoutConfig | undefined {
+  if (!layoutConfig) return layoutConfig;
+  const sections = Array.isArray(layoutConfig.sections) ? layoutConfig.sections : [];
+  const slots = buildMaterialsSlotsFromDraft(sceneDraft).length
+    ? buildMaterialsSlotsFromDraft(sceneDraft)
+    : buildMaterialsSlotsFromLayerPlan(layerPlan);
+  let repaired = false;
+  const nextSections = sections.map((section) => {
+    let changed = false;
+    const nextComponents = (section.components ?? []).map((component: any) => {
+      if (component.type !== 'media-uploader') return component;
+      if (!slots.length) return component;
+      const mergedSlots = mergeMediaSlots(component.slots, slots);
+      const hasSameSlots =
+        Array.isArray(component.slots) &&
+        component.slots.length === mergedSlots.length &&
+        component.slots.every((slot: MediaSlot, index: number) => isSameSlot(slot, mergedSlots[index]));
+      if (hasSameSlots) return component;
+      changed = true;
+      repaired = true;
+      return {
+        ...component,
+        slots: mergedSlots,
+      };
+    });
+    if (!changed) return section;
+    return {
+      ...section,
+      components: nextComponents,
+    };
+  });
+  const hasMaterials = nextSections.some((section) =>
+    (section.components ?? []).some((component: any) => component.type === 'media-uploader'),
+  );
+  if (hasMaterials) {
+    const withFallbacks = appendStableFallbackSections(nextSections, sceneDraft, slots);
+    const structureChanged =
+      withFallbacks.length !== sections.length ||
+      withFallbacks.some((section, index) => section !== sections[index]);
+    return repaired || structureChanged ? { ...layoutConfig, sections: withFallbacks } : layoutConfig;
+  }
+
+  return {
+    ...layoutConfig,
+    sections: appendStableFallbackSections(nextSections, sceneDraft, slots),
+  };
 }
 
-function coerceNumber(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
+function buildMaterialsSlotsFromLayerPlan(layerPlan: any): MediaSlot[] {
+  const planLayers = Array.isArray(layerPlan?.layer_plan) ? layerPlan.layer_plan : [];
+  return planLayers
+    .filter((layer: any) => {
+      const type = String(layer?.layer_type || '').toLowerCase();
+      return type === 'background' || type === 'subject' || type === 'decor';
+    })
+    .map((layer: any, index: number) => ({
+      id: String(layer?.layer_id || layer?.id || `slot-${index + 1}`),
+      label: String(layer?.layer_name || layer?.name || `图层 ${index + 1}`),
+      layerType: normalizeLayerType(layer?.layer_type),
+      prompt: String(layer?.prompt || '').trim() || `生成${String(layer?.layer_name || layer?.name || `图层 ${index + 1}`)}`,
+    }));
+}
+
+function buildMaterialsSlotsFromDraft(sceneDraft?: SceneDraft): MediaSlot[] {
+  const draftSlots = Array.isArray(sceneDraft?.materials?.slots) ? sceneDraft.materials.slots : [];
+  return draftSlots
+    .map((slot, index) => normalizeDraftMaterialSlot(slot, index))
+    .filter(Boolean) as MediaSlot[];
+}
+
+function normalizeDraftMaterialSlot(slot: SceneMaterialDraftSlot | null | undefined, index = 0): MediaSlot | null {
+  if (!slot || typeof slot !== 'object') return null;
+  const label = String(slot.label || '').trim() || `素材 ${index + 1}`;
+  const prompt = String(slot.prompt || '').trim() || `生成${label}`;
+  return {
+    id: String(slot.id || `draft-slot-${index + 1}`),
+    label,
+    layerType: normalizeLayerType(slot.layer_type),
+    prompt,
+  };
+}
+
+function normalizeLayerType(value: unknown): 'background' | 'subject' | 'decor' {
+  const type = String(value || '').trim().toLowerCase();
+  if (type === 'background' || type === 'subject' || type === 'decor') {
+    return type;
+  }
+  return 'subject';
+}
+
+function mergeMediaSlots(existingSlots: unknown, draftSlots: MediaSlot[]): MediaSlot[] {
+  const current = Array.isArray(existingSlots) ? existingSlots : [];
+  if (!current.length) {
+    return draftSlots.map((slot) => ({ ...slot }));
+  }
+  if (!draftSlots.length) {
+    return current.map((slot) => ({ ...slot }));
+  }
+
+  const next = current.map((slot: MediaSlot) => {
+    const match = findMatchingSlot(slot, draftSlots);
+    if (!match) return { ...slot };
+    return {
+      ...slot,
+      label: match.label || slot.label,
+      layerType: match.layerType || slot.layerType,
+      prompt: match.prompt || slot.prompt,
+      uri: slot.uri,
+      hasTransparentBg: slot.hasTransparentBg,
+    };
+  });
+
+  draftSlots.forEach((slot) => {
+    const exists = next.some((candidate) => isSlotMatch(candidate, slot));
+    if (!exists) {
+      next.push({ ...slot });
+    }
+  });
+
+  return next;
+}
+
+function findMatchingSlot(slot: MediaSlot, candidates: MediaSlot[]): MediaSlot | undefined {
+  return candidates.find((candidate) => isSlotMatch(slot, candidate));
+}
+
+function isSlotMatch(left: MediaSlot, right: MediaSlot): boolean {
+  return (
+    String(left.id || '').trim() === String(right.id || '').trim() ||
+    (
+      normalizeLayerType(left.layerType) === normalizeLayerType(right.layerType) &&
+      String(left.label || '').trim() === String(right.label || '').trim()
+    )
+  );
+}
+
+function isSameSlot(left: MediaSlot | undefined, right: MediaSlot | undefined): boolean {
+  if (!left || !right) return false;
+  return (
+    left.id === right.id &&
+    left.label === right.label &&
+    left.layerType === right.layerType &&
+    left.prompt === right.prompt &&
+    left.uri === right.uri &&
+    left.hasTransparentBg === right.hasTransparentBg
+  );
+}
+
+function appendStableFallbackSections(
+  sections: LayoutSection[],
+  sceneDraft: SceneDraft | undefined,
+  slots: MediaSlot[],
+): LayoutSection[] {
+  const nextSections = [...sections];
+  const hasMaterials = nextSections.some((section) =>
+    (section.components ?? []).some((component: any) => component.type === 'media-uploader'),
+  );
+  const hasCopy = nextSections.some((section) => isCopySection(section));
+  const hasControls = nextSections.some((section) => isControlSection(section));
+
+  if (!hasMaterials && slots.length) {
+    nextSections.unshift(buildMaterialsFallbackSection(slots));
+  }
+  if (!hasCopy) {
+    nextSections.push(buildCopyFallbackSection(sceneDraft));
+  }
+  if (!hasControls) {
+    nextSections.push(buildControlsFallbackSection(sceneDraft));
+  }
+  return dedupeSections(nextSections);
+}
+
+function dedupeSections(sections: LayoutSection[]): LayoutSection[] {
+  const seen = new Set<string>();
+  return sections.filter((section) => {
+    const id = String(section.id || '').trim();
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function buildMaterialsFallbackSection(slots: MediaSlot[]): LayoutSection {
+  return {
+    id: 'materials-fallback',
+    cardType: 'materials',
+    title: '素材准备',
+    description: '当前布局未返回素材区，已按场景规划自动补齐',
+    layout: { span: 2, tone: 'soft' },
+    components: [
+      {
+        id: 'materials-uploader-fallback',
+        type: 'media-uploader',
+        title: '上传或生成素材',
+        slots: slots.map((slot) => ({ ...slot })),
+      },
+    ],
+  };
+}
+
+function buildCopyFallbackSection(sceneDraft?: SceneDraft): LayoutSection {
+  return {
+    id: 'copywriting-fallback',
+    cardType: 'copywriting',
+    title: '文案与内容',
+    description: '文案区缺失时使用稳定的编辑骨架兜底',
+    layout: { span: 2, tone: 'soft' },
+    components: [
+      {
+        id: 'headline',
+        type: 'text-input',
+        label: '主标题',
+        placeholder: '输入主标题',
+        default: sceneDraft?.copy?.headline || '',
+      },
+      {
+        id: 'subtitle',
+        type: 'text-input',
+        label: '副标题',
+        placeholder: '输入副标题',
+        default: sceneDraft?.copy?.subtitle || '',
+      },
+      {
+        id: 'body-copy',
+        type: 'textarea',
+        label: '正文文案',
+        placeholder: '输入补充文案',
+        default: sceneDraft?.copy?.body || '',
+      },
+      {
+        id: 'primary-color',
+        type: 'color-palette',
+        label: '主色调',
+        default: sceneDraft?.copy?.primary_color || '#F4A261',
+        options: [
+          { value: '#F4A261', label: '暖橙', color: '#F4A261' },
+          { value: '#264653', label: '深蓝', color: '#264653' },
+          { value: '#111827', label: '深灰', color: '#111827' },
+          { value: '#2A9D8F', label: '青绿', color: '#2A9D8F' },
+          { value: '#E63946', label: '朱红', color: '#E63946' },
+        ],
+        helperText: '文案和形状层会优先使用这个颜色',
+      },
+    ],
+  };
+}
+
+function buildControlsFallbackSection(sceneDraft?: SceneDraft): LayoutSection {
+  return {
+    id: 'controls-fallback',
+    cardType: 'controls',
+    title: '生成控制',
+    description: '提示词和参数区缺失时使用稳定兜底',
+    layout: { span: 2, tone: 'soft' },
+    components: [
+      {
+        id: 'aspect-ratio',
+        type: 'ratio-select',
+        label: '画幅比例',
+        default: sceneDraft?.brief?.aspect_ratio || '3:4',
+        options: ['1:1', '3:4', '4:3', '9:16', '16:9'],
+      },
+      {
+        id: 'generation-prompts',
+        type: 'prompt-editor',
+        title: '提示词',
+        fields: [
+          {
+            id: 'positive',
+            label: '正向提示词',
+            default: sceneDraft?.controls?.positive_prompt || sceneDraft?.brief?.prompt || '',
+          },
+          {
+            id: 'negative',
+            label: '负向提示词',
+            default: sceneDraft?.controls?.negative_prompt || '',
+          },
+        ],
+      },
+      {
+        id: 'steps',
+        type: 'slider',
+        label: '采样步数',
+        min: 10,
+        max: 60,
+        step: 1,
+        default: sceneDraft?.controls?.steps ?? 28,
+      },
+      {
+        id: 'cfg-scale',
+        type: 'slider',
+        label: 'CFG',
+        min: 1,
+        max: 15,
+        step: 0.5,
+        default: sceneDraft?.controls?.cfg_scale ?? 7,
+      },
+      {
+        id: 'seed-lock',
+        type: 'toggle',
+        label: '锁定种子',
+        default: Boolean(sceneDraft?.controls?.seed_locked),
+        helperText: '锁定后重复生成会更稳定',
+      },
+    ],
+  };
+}
+
+function buildSceneUiState(layoutConfig?: LayoutConfig, sceneDraft?: SceneDraft): Record<string, any> {
+  const next = initializeUiState(layoutConfig);
+  if (!layoutConfig?.sections?.length || !sceneDraft) return next;
+
+  layoutConfig.sections.forEach((section) => {
+    (section.components ?? []).forEach((component: any) => {
+      if (component.type === 'media-uploader') {
+        next[component.id] = mergeMediaSlots(next[component.id], buildMaterialsSlotsFromDraft(sceneDraft));
+        return;
+      }
+      if (component.type === 'prompt-editor') {
+        const current = typeof next[component.id] === 'object' && next[component.id] ? next[component.id] : {};
+        next[component.id] = {
+          ...current,
+          positive: sceneDraft.controls.positive_prompt || current.positive || '',
+          negative: sceneDraft.controls.negative_prompt || current.negative || '',
+        };
+        return;
+      }
+      if (matchesCopyField(component, 'headline')) {
+        next[component.id] = sceneDraft.copy.headline || next[component.id] || '';
+        return;
+      }
+      if (matchesCopyField(component, 'subtitle')) {
+        next[component.id] = sceneDraft.copy.subtitle || next[component.id] || '';
+        return;
+      }
+      if (matchesCopyField(component, 'body')) {
+        next[component.id] = sceneDraft.copy.body || next[component.id] || '';
+        return;
+      }
+      if (component.type === 'color-palette' && isPrimaryColorComponent(component)) {
+        next[component.id] = resolveColorPaletteValue(component, sceneDraft.copy.primary_color || '#F4A261');
+        return;
+      }
+      if (isAspectRatioComponent(component)) {
+        next[component.id] = sceneDraft.brief.aspect_ratio || next[component.id] || '3:4';
+        return;
+      }
+      if (isStepsComponent(component)) {
+        next[component.id] = sceneDraft.controls.steps ?? next[component.id] ?? 28;
+        return;
+      }
+      if (isCfgScaleComponent(component)) {
+        next[component.id] = sceneDraft.controls.cfg_scale ?? next[component.id] ?? 7;
+        return;
+      }
+      if (isSeedLockComponent(component)) {
+        next[component.id] = Boolean(sceneDraft.controls.seed_locked);
+      }
+    });
+  });
+
+  return next;
+}
+
+function normalizeSceneDraft(
+  value: Partial<SceneDraft> | undefined,
+  prompt: string,
+  selectedOptions: Record<string, string[]>,
+): SceneDraft {
+  const normalizedSlots = normalizeDraftMaterials(value?.materials?.slots, value?.materials);
+  const background = normalizedSlots.find((slot) => slot.layer_type === 'background') ?? null;
+  const subjects = normalizedSlots.filter((slot) => slot.layer_type === 'subject');
+  const decors = normalizedSlots.filter((slot) => slot.layer_type === 'decor');
+
+  return {
+    brief: {
+      prompt: safeText(value?.brief?.prompt, prompt),
+      summary: safeText(value?.brief?.summary, prompt),
+      aspect_ratio: safeText(value?.brief?.aspect_ratio, selectedOptions['画幅比例']?.[0] || '3:4'),
+    },
+    copy: {
+      headline: safeText(value?.copy?.headline),
+      subtitle: safeText(value?.copy?.subtitle),
+      body: safeText(value?.copy?.body),
+      primary_color: safeText(value?.copy?.primary_color, '#F4A261'),
+    },
+    controls: {
+      positive_prompt: safeText(
+        value?.controls?.positive_prompt ?? value?.controls?.positivePrompt,
+        prompt,
+      ),
+      negative_prompt: safeText(value?.controls?.negative_prompt),
+      steps: safeNumber(value?.controls?.steps, 28),
+      cfg_scale: safeNumber(value?.controls?.cfg_scale, 7),
+      seed_locked: Boolean(value?.controls?.seed_locked),
+    },
+    materials: {
+      background,
+      subjects,
+      decors,
+      slots: normalizedSlots,
+    },
+  };
+}
+
+function normalizeDraftMaterials(
+  slotsValue: SceneDraft['materials']['slots'] | undefined,
+  materialsValue: Partial<SceneDraft['materials']> | undefined,
+): SceneDraft['materials']['slots'] {
+  const directSlots = Array.isArray(slotsValue) ? slotsValue : [];
+  const grouped = [
+    materialsValue?.background,
+    ...(Array.isArray(materialsValue?.subjects) ? materialsValue.subjects : []),
+    ...(Array.isArray(materialsValue?.decors) ? materialsValue.decors : []),
+  ];
+  const source = directSlots.length ? directSlots : grouped;
+
+  return source
+    .map((slot, index) => {
+      if (!slot || typeof slot !== 'object') return null;
+      return {
+        id: safeText((slot as SceneMaterialDraftSlot).id, `draft-slot-${index + 1}`),
+        label: safeText((slot as SceneMaterialDraftSlot).label, `素材 ${index + 1}`),
+        layer_type: normalizeLayerType((slot as SceneMaterialDraftSlot).layer_type),
+        prompt: safeText((slot as SceneMaterialDraftSlot).prompt, `生成素材 ${index + 1}`),
+      };
+    })
+    .filter(Boolean) as SceneDraft['materials']['slots'];
+}
+
+function safeText(value: unknown, fallback = ''): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || fallback;
+}
+
+function safeNumber(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function matchesCopyField(component: any, kind: 'headline' | 'subtitle' | 'body'): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  if (kind === 'headline') return /headline|title|主标题|标题|scene-title|场景名称/.test(sample);
+  if (kind === 'subtitle') return /subtitle|副标题|slogan|标语|卖点/.test(sample);
+  return /body|copy|正文|文案/.test(sample);
+}
+
+function isPrimaryColorComponent(component: any): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  return /color|palette|主色|色调/.test(sample);
+}
+
+function resolveColorPaletteValue(component: any, desiredColor: string): string {
+  const options = Array.isArray(component?.options) ? component.options : [];
+  const normalizedColor = String(desiredColor || '').trim().toLowerCase();
+  const matched = options.find((option: any) => {
+    if (typeof option === 'string') {
+      return option.trim().toLowerCase() === normalizedColor;
+    }
+    return (
+      String(option?.value || '').trim().toLowerCase() === normalizedColor ||
+      String(option?.color || '').trim().toLowerCase() === normalizedColor
+    );
+  });
+  if (typeof matched === 'string') return matched;
+  if (matched && typeof matched === 'object') {
+    return String(matched.value || matched.color || desiredColor);
+  }
+  return desiredColor;
+}
+
+function isAspectRatioComponent(component: any): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  return component?.type === 'ratio-select' || /ratio|aspect|比例|画幅/.test(sample);
+}
+
+function isStepsComponent(component: any): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  return /steps|采样步数/.test(sample);
+}
+
+function isCfgScaleComponent(component: any): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  return /cfg|guidance/.test(sample);
+}
+
+function isSeedLockComponent(component: any): boolean {
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  return /seed-lock|seed|种子/.test(sample);
+}
+
+function isCopySection(section: LayoutSection): boolean {
+  if ((section.cardType || '').toLowerCase() === 'copywriting') return true;
+  return (section.components ?? []).some((component: any) => {
+    const sample = `${component.id || ''} ${component.label || ''} ${component.title || ''}`.toLowerCase();
+    return /标题|headline|subtitle|文案|copy|body/.test(sample);
+  });
+}
+
+function isControlSection(section: LayoutSection): boolean {
+  return (section.components ?? []).some((component: any) => {
+    const sample = `${component.id || ''} ${component.label || ''} ${component.title || ''}`.toLowerCase();
+    return component.type === 'prompt-editor' || /steps|cfg|seed|ratio|画幅|提示词/.test(sample);
+  });
 }
 
 function initializeUiState(layoutConfig?: LayoutConfig): Record<string, any> {
@@ -1743,8 +2213,12 @@ function initializeUiState(layoutConfig?: LayoutConfig): Record<string, any> {
         const fallback = component.min ?? 0;
         const defaultValue = Number.isFinite(Number(rawDefault)) ? Number(rawDefault) : fallback;
         next[component.id] = defaultValue;
-      } else if (component.type === 'color-palette' && component.allowMultiple) {
-        next[component.id] = Array.isArray(component.default) ? component.default : [];
+      } else if (component.type === 'color-palette') {
+        const allowMultiple = 'allowMultiple' in component && Boolean((component as any).allowMultiple);
+        next[component.id] =
+          allowMultiple && Array.isArray(component.default)
+            ? component.default
+            : component.default ?? '';
       } else {
         next[component.id] = component.default ?? '';
       }
@@ -1769,6 +2243,113 @@ function extractMediaSlots(layoutConfig: LayoutConfig | undefined, uiState: Reco
   return slots;
 }
 
+function collectTextLayers(
+  layoutConfig: LayoutConfig | undefined,
+  uiState: Record<string, any>,
+  selectedOptions: Record<string, string[]>,
+): TextLayerDraft[] {
+  if (!layoutConfig?.sections?.length) return [];
+  const results: TextLayerDraft[] = [];
+  const color = findPrimaryColor(layoutConfig, uiState) || '#111827';
+
+  layoutConfig.sections.forEach((section) => {
+    (section.components ?? []).forEach((component: any) => {
+      const label = component.label || component.title || component.id;
+      if ((component.type === 'text-input' || component.type === 'textarea') && shouldExportCanvasText(component.id, label)) {
+        const text = normalizeText(uiState[component.id]);
+        if (!text) return;
+        results.push({
+          id: component.id,
+          name: label,
+          text,
+          role: inferTextRole(label, text),
+          color,
+          align: 'left',
+        });
+      }
+    });
+  });
+
+  if (!results.length) {
+    const mood = selectedOptions['氛围']?.[0];
+    if (mood) {
+      results.push({
+        id: 'fallback-subtitle',
+        name: '副标题',
+        text: mood,
+        role: 'subtitle',
+        color,
+        align: 'left',
+      });
+    }
+  }
+
+  const unique = new Map<string, TextLayerDraft>();
+  results.forEach((item) => {
+    const key = `${item.role}:${item.text}`;
+    if (!unique.has(key)) unique.set(key, item);
+  });
+  return Array.from(unique.values()).slice(0, 4);
+}
+
+function findPrimaryColor(layoutConfig: LayoutConfig | undefined, uiState: Record<string, any>): string | undefined {
+  if (!layoutConfig?.sections?.length) return undefined;
+  for (const section of layoutConfig.sections) {
+    for (const component of section.components ?? []) {
+      if ((component as any).type !== 'color-palette') continue;
+      const paletteOptions = Array.isArray((component as any).options) ? (component as any).options : [];
+      const resolvePaletteColor = (entry: unknown): string | undefined => {
+        if (typeof entry !== 'string' || !entry.trim()) return undefined;
+        const normalized = entry.trim();
+        const matched = paletteOptions.find((option: any) => {
+          if (typeof option === 'string') {
+            return option.trim() === normalized;
+          }
+          return String(option?.value ?? '').trim() === normalized;
+        });
+        if (matched && typeof matched === 'object') {
+          const swatch = typeof matched.color === 'string' ? matched.color.trim() : '';
+          if (swatch) return swatch;
+        }
+        return /^#|^rgb|^hsl/i.test(normalized) ? normalized : undefined;
+      };
+      const value = uiState[(component as any).id];
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          const color = resolvePaletteColor(entry);
+          if (color) return color;
+        }
+        continue;
+      }
+      const color = resolvePaletteColor(value);
+      if (color) return color;
+    }
+  }
+  return undefined;
+}
+
+function inferTextRole(label: string, text: string): 'title' | 'subtitle' | 'body' {
+  const sample = `${label} ${text}`.toLowerCase();
+  if (/标题|title|headline|主标题|场景名称|scene-title/.test(sample)) return 'title';
+  if (/副标题|subtitle|slogan|标语|卖点/.test(sample)) return 'subtitle';
+  return text.length <= 18 ? 'subtitle' : 'body';
+}
+
+function shouldExportCanvasText(id: string, label: string): boolean {
+  const sample = `${id} ${label}`.toLowerCase();
+  if (/prompt|negative|scene-notes|提示词/.test(sample)) {
+    return false;
+  }
+  if (/备注|说明|补充描述/.test(sample)) {
+    return false;
+  }
+  return /标题|title|headline|副标题|subtitle|slogan|标语|文案|卖点|正文|body|copy|场景名称|scene-title/.test(sample);
+}
+
+function normalizeText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function parseAspectRatio(ratio: string): number {
   if (!ratio) return 3 / 4;
   if (ratio.includes(':')) {
@@ -1780,9 +2361,9 @@ function parseAspectRatio(ratio: string): number {
 }
 
 function resolveSizeForSlot(isBackground: boolean, aspectRatio: string) {
-  if (!isBackground) return { width: 512, height: 512 };
+  if (!isBackground) return { width: 1024, height: 1024 };
   const ratio = parseAspectRatio(aspectRatio);
-  const width = 768;
+  const width = 1536;
   const height = Math.round(width / ratio);
   return { width, height };
 }
@@ -1825,6 +2406,17 @@ function toApiErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function resolveImageGenerationStatusMessage(data: any, successMessage: string) {
+  if (!data?.fallback_used) {
+    return successMessage;
+  }
+  const reason =
+    typeof data?.fallback_reason === 'string' && data.fallback_reason.trim()
+      ? ` 原因：${data.fallback_reason.trim()}`
+      : '';
+  return `模型不可用，已自动使用占位图继续流程。${reason}`;
+}
+
 async function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1835,6 +2427,10 @@ async function fileToDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(new Error('读取文件失败'));
     reader.readAsDataURL(file);
   });
+}
+
+function detectAlphaFromDataUrl(dataUrl: string): boolean {
+  return dataUrl.startsWith('data:image/png') || dataUrl.startsWith('data:image/webp');
 }
 
 function buildPlaceholderDataUrl(label: string, width: number, height: number): string {

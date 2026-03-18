@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+import math
 import shutil
 import os
 import json
@@ -258,12 +259,22 @@ class ImageRequest(BaseModel):
     num_inference_steps: Optional[int] = 30
     guidance_scale: Optional[float] = 7.5
     image_provider: Optional[str] = None
+    layer_type: Optional[str] = None
+    transparent_background: Optional[bool] = False
+    remove_background: Optional[bool] = None
 
 
 class LayoutRequest(BaseModel):
     prompt: str
     chat_history: Optional[str] = None
     selected_options: Optional[dict] = None
+
+
+class ScenePreviewRequest(BaseModel):
+    aspect_ratio: Optional[str] = "3:4"
+    materials: Optional[List[dict]] = None
+    text_layers: Optional[List[dict]] = None
+    text_panel_fill: Optional[str] = None
 
 
 class LayeredRequest(BaseModel):
@@ -397,7 +408,7 @@ def _resolve_llm_config() -> dict:
         model = os.getenv("SILICONFLOW_MODEL", "").strip()
     if not model:
         model = os.getenv("GEMINI_MODEL", "").strip()
-    model = model or "Qwen/Qwen3-Next-80B-A3B-Instruct"
+    model = model or "Qwen/Qwen3-30B-A3B-Instruct-2507"
     temperature = _resolve_llm_temperature()
     return {
         "api_key": api_key,
@@ -1230,6 +1241,35 @@ def _build_rule_layout_payload(prompt: str, chat_history: Optional[str], selecte
                 ],
             },
             {
+                "id": "copywriting",
+                "cardType": "copywriting",
+                "title": "文案内容",
+                "description": "这些文字会进入实时预览和画布导出",
+                "components": [
+                    {
+                        "id": "headline",
+                        "type": "text-input",
+                        "label": "主标题",
+                        "placeholder": "例如：未来都市发布会",
+                        "default": (prompt or "")[:18],
+                    },
+                    {
+                        "id": "subtitle",
+                        "type": "text-input",
+                        "label": "副标题",
+                        "placeholder": "一句补充氛围或卖点",
+                        "default": mood_defaults[0] if mood_defaults else "",
+                    },
+                    {
+                        "id": "body-copy",
+                        "type": "textarea",
+                        "label": "补充文案",
+                        "placeholder": "可填写活动信息、卖点或一句描述",
+                        "default": "",
+                    },
+                ],
+            },
+            {
                 "id": "style",
                 "cardType": "style-core",
                 "title": "风格与氛围",
@@ -1725,6 +1765,57 @@ def _sanitize_components(raw_components, base_prompt: str, style: str, moods: Li
     return components
 
 
+def _is_canvas_copy_component(component: dict) -> bool:
+    if not isinstance(component, dict):
+        return False
+    comp_type = str(component.get("type") or "").strip().lower()
+    if comp_type not in {"text-input", "textarea"}:
+        return False
+    sample = " ".join(
+        [
+            str(component.get("id") or ""),
+            str(component.get("label") or ""),
+            str(component.get("title") or ""),
+        ]
+    ).lower()
+    if re.search(r"(prompt|negative|scene-notes|描述|备注|说明|补充描述|提示词)", sample):
+        return False
+    return bool(re.search(r"(title|headline|subtitle|slogan|copy|body|标题|副标题|文案|卖点|正文|场景名称)", sample))
+
+
+def _build_default_copy_section(base_prompt: str, selected_options: dict, used_section_ids: set, used_component_ids: set) -> dict:
+    subtitle_default = _pick_selected_first(selected_options or {}, ["氛围", "情绪氛围", "情绪", "氛围关键词"]) or ""
+    return {
+        "id": _ensure_unique_id("copywriting", used_section_ids, "section"),
+        "title": "文案内容",
+        "description": "这些文字会进入实时预览和画布导出",
+        "cardType": "copywriting",
+        "components": [
+            {
+                "id": _ensure_unique_id("headline", used_component_ids, "component"),
+                "type": "text-input",
+                "label": "主标题",
+                "placeholder": "例如：新品发布海报",
+                "default": (base_prompt or "")[:18],
+            },
+            {
+                "id": _ensure_unique_id("subtitle", used_component_ids, "component"),
+                "type": "text-input",
+                "label": "副标题",
+                "placeholder": "一句补充氛围或卖点",
+                "default": subtitle_default,
+            },
+            {
+                "id": _ensure_unique_id("body-copy", used_component_ids, "component"),
+                "type": "textarea",
+                "label": "补充文案",
+                "placeholder": "可填写活动信息、卖点或一句描述",
+                "default": "",
+            },
+        ],
+    }
+
+
 def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selected_options: dict) -> dict:
     if not isinstance(obj, dict):
         return fallback
@@ -1745,6 +1836,7 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
 
     sanitized_sections = []
     has_media = False
+    has_copy = False
     used_section_ids: set = set()
     used_component_ids: set = set()
     ratio_component_ids: List[str] = []
@@ -1776,6 +1868,8 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
             continue
         if any(comp.get("type") == "media-uploader" for comp in components):
             has_media = True
+        if any(_is_canvas_copy_component(comp) for comp in components):
+            has_copy = True
         ratio_component_ids.extend([comp["id"] for comp in components if comp.get("type") == "ratio-select"])
         entry = {"id": str(section_id), "components": components}
         if title:
@@ -1794,6 +1888,8 @@ def _normalize_layout_payload(obj: dict, fallback: dict, base_prompt: str, selec
 
     if not sanitized_sections or not has_media:
         return fallback
+    if not has_copy:
+        sanitized_sections.insert(1 if len(sanitized_sections) > 1 else len(sanitized_sections), _build_default_copy_section(base_prompt, selected_options, used_section_ids, used_component_ids))
 
     meta = layout.get("meta") if isinstance(layout.get("meta"), dict) else {}
     meta.setdefault("sourcePrompt", base_prompt)
@@ -1906,6 +2002,140 @@ def generate_llm_layout(req: LayoutRequest) -> dict:
     combined = {"text_response": text_response, "layout_config": layout_with_slots}
     return _normalize_layout_payload(combined, fallback, req.prompt, req.selected_options or {})
 
+
+def _extract_scene_copy_from_layout(layout_config: dict) -> dict:
+    copy_defaults = {
+        "headline": "",
+        "subtitle": "",
+        "body": "",
+        "primary_color": "#F4A261",
+    }
+    if not isinstance(layout_config, dict):
+        return copy_defaults
+    for section in layout_config.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for component in section.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            component_id = str(component.get("id") or "").strip().lower()
+            label = str(component.get("label") or component.get("title") or "").strip().lower()
+            sample = f"{component_id} {label}"
+            if component.get("type") in {"text-input", "textarea"}:
+                default_text = str(component.get("default") or "").strip()
+                if not default_text:
+                    continue
+                if re.search(r"(headline|title|主标题|标题|scene-title|场景名称)", sample):
+                    copy_defaults["headline"] = copy_defaults["headline"] or default_text
+                elif re.search(r"(subtitle|副标题|slogan|标语|卖点)", sample):
+                    copy_defaults["subtitle"] = copy_defaults["subtitle"] or default_text
+                elif re.search(r"(body|copy|正文|文案)", sample):
+                    copy_defaults["body"] = copy_defaults["body"] or default_text
+            if component.get("type") == "color-palette":
+                options = component.get("options") or []
+                default_value = str(component.get("default") or "").strip()
+                for option in options:
+                    if isinstance(option, dict) and str(option.get("value") or "").strip() == default_value:
+                        color = str(option.get("color") or "").strip()
+                        if color:
+                            copy_defaults["primary_color"] = color
+                        break
+    return copy_defaults
+
+
+def _extract_scene_controls_from_layout(layout_config: dict, prompt: str) -> dict:
+    controls = {
+        "positive_prompt": prompt or "",
+        "negative_prompt": "",
+        "steps": 28,
+        "cfg_scale": 7,
+        "seed_locked": False,
+    }
+    if not isinstance(layout_config, dict):
+        return controls
+    for section in layout_config.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for component in section.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            component_id = str(component.get("id") or "").strip().lower()
+            if component.get("type") == "prompt-editor":
+                for field in component.get("fields") or []:
+                    if not isinstance(field, dict):
+                        continue
+                    field_id = str(field.get("id") or "").strip().lower()
+                    default = str(field.get("default") or "").strip()
+                    if field_id == "positive" and default:
+                        controls["positive_prompt"] = default
+                    elif field_id == "negative":
+                        controls["negative_prompt"] = default
+            elif component_id == "steps":
+                step_value = _coerce_number(component.get("default"))
+                if step_value is not None:
+                    controls["steps"] = int(step_value)
+            elif component_id == "cfg-scale":
+                cfg_value = _coerce_number(component.get("default"))
+                if cfg_value is not None:
+                    controls["cfg_scale"] = cfg_value
+            elif component_id == "seed-lock":
+                controls["seed_locked"] = _coerce_bool(component.get("default"), default=False)
+    return controls
+
+
+def _extract_scene_materials_from_layout(layout_config: dict) -> dict:
+    grouped = {"background": None, "subjects": [], "decors": [], "slots": []}
+    if not isinstance(layout_config, dict):
+        return grouped
+    for slot in _extract_media_slots(layout_config):
+        if not isinstance(slot, dict):
+            continue
+        normalized = {
+            "id": _safe_text(slot.get("id")),
+            "label": _safe_text(slot.get("label"), "素材"),
+            "layer_type": _safe_text(slot.get("layerType"), "subject"),
+            "prompt": _safe_text(slot.get("prompt")),
+        }
+        grouped["slots"].append(normalized)
+        if normalized["layer_type"] == "background":
+            grouped["background"] = normalized
+        elif normalized["layer_type"] == "decor":
+            grouped["decors"].append(normalized)
+        else:
+            grouped["subjects"].append(normalized)
+    return grouped
+
+
+def build_scene_plan_payload(req: LayoutRequest) -> dict:
+    layout_payload = generate_llm_layout(req)
+    layer_plan_payload = analyze_layer_plan(
+        {
+            "chat_history": req.chat_history or f"User: {req.prompt}",
+            "selected_options": req.selected_options or {},
+            "ui_state": {},
+        }
+    )
+    layout_config = layout_payload.get("layout_config") if isinstance(layout_payload, dict) else {}
+    draft = {
+        "brief": {
+            "prompt": req.prompt,
+            "summary": _safe_text((layout_config.get("meta") or {}).get("summary"), req.prompt),
+            "aspect_ratio": _safe_text(
+                (layout_config.get("meta") or {}).get("aspect_ratio"),
+                _infer_aspect_ratio(req.prompt, req.selected_options or {}),
+            ),
+        },
+        "copy": _extract_scene_copy_from_layout(layout_config),
+        "controls": _extract_scene_controls_from_layout(layout_config, req.prompt),
+        "materials": _extract_scene_materials_from_layout(layout_config),
+    }
+    return {
+        "text_response": layout_payload.get("text_response") or "",
+        "layout_config": layout_config,
+        "layer_plan": layer_plan_payload,
+        "draft": draft,
+    }
+
 import uuid
 
 inference_status = {
@@ -1943,6 +2173,113 @@ def _build_placeholder_image(prompt: str, width: int = 512, height: int = 512) -
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _build_fallback_generated_image(
+    prompt: str,
+    width: int = 512,
+    height: int = 512,
+    layer_type: Optional[str] = None,
+    transparent_background: bool = False,
+) -> str:
+    safe_width = max(128, int(width or 512))
+    safe_height = max(128, int(height or 512))
+    normalized_type = _normalize_layer_type(layer_type, "")
+    label = (prompt or "AIGC Center").strip()[:36] or "AIGC Center"
+
+    if normalized_type == "background" and not transparent_background:
+        img = Image.new("RGBA", (safe_width, safe_height), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        top = (52, 104, 190)
+        bottom = (244, 162, 97)
+        for y in range(safe_height):
+            ratio = y / max(1, safe_height - 1)
+            color = tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3))
+            draw.line((0, y, safe_width, y), fill=(*color, 255))
+        draw.ellipse(
+            (
+                int(safe_width * 0.62),
+                int(safe_height * 0.08),
+                int(safe_width * 0.92),
+                int(safe_height * 0.36),
+            ),
+            fill=(255, 255, 255, 56),
+        )
+        draw.rounded_rectangle(
+            (
+                int(safe_width * 0.08),
+                int(safe_height * 0.68),
+                int(safe_width * 0.72),
+                int(safe_height * 0.9),
+            ),
+            radius=24,
+            fill=(255, 255, 255, 198),
+        )
+        text_fill = (22, 28, 45, 255)
+    else:
+        img = Image.new("RGBA", (safe_width, safe_height), (0, 0, 0, 0) if transparent_background else (246, 247, 249, 255))
+        draw = ImageDraw.Draw(img)
+        accent_map = {
+            "subject": (70, 118, 255, 255),
+            "decor": (255, 126, 95, 255),
+            "background": (52, 104, 190, 255),
+        }
+        accent = accent_map.get(normalized_type, (70, 118, 255, 255))
+        shadow = (*accent[:3], 56)
+        margin_x = int(safe_width * 0.14)
+        margin_y = int(safe_height * 0.12)
+        draw.ellipse(
+            (
+                margin_x + 24,
+                margin_y + 28,
+                safe_width - margin_x + 18,
+                safe_height - margin_y + 22,
+            ),
+            fill=shadow,
+        )
+        draw.rounded_rectangle(
+            (
+                margin_x,
+                margin_y,
+                safe_width - margin_x,
+                safe_height - margin_y,
+            ),
+            radius=max(24, min(safe_width, safe_height) // 7),
+            fill=accent,
+        )
+        draw.rounded_rectangle(
+            (
+                margin_x + int((safe_width - 2 * margin_x) * 0.18),
+                margin_y + int((safe_height - 2 * margin_y) * 0.18),
+                safe_width - margin_x - int((safe_width - 2 * margin_x) * 0.18),
+                safe_height - margin_y - int((safe_height - 2 * margin_y) * 0.18),
+            ),
+            radius=max(18, min(safe_width, safe_height) // 10),
+            fill=(255, 255, 255, 228),
+        )
+        text_fill = (24, 32, 55, 255)
+
+    font = ImageFont.load_default()
+    lines = [label[i:i + 16] for i in range(0, len(label), 16)] or ["AIGC Center"]
+    line_gap = 8
+    text_height = 0
+    metrics = []
+    for line in lines[:3]:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        line_h = bbox[3] - bbox[1]
+        metrics.append((line, line_w, line_h))
+        text_height += line_h
+    text_height += max(0, len(metrics) - 1) * line_gap
+    cursor_y = (safe_height - text_height) / 2
+    for line, line_w, line_h in metrics:
+        draw.text(((safe_width - line_w) / 2, cursor_y), line, fill=text_fill, font=font)
+        cursor_y += line_h + line_gap
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
 def _parse_aspect_ratio(ratio_str: str) -> float:
     try:
         if ":" in ratio_str:
@@ -1951,6 +2288,265 @@ def _parse_aspect_ratio(ratio_str: str) -> float:
         return float(ratio_str)
     except Exception:
         return 3 / 4
+
+
+def _clamp_number(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _safe_text(value, fallback: str = "") -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or fallback
+    return fallback
+
+
+def _aspect_size(aspect_ratio: str, width: int = 1536) -> tuple[int, int]:
+    ratio = _parse_aspect_ratio(aspect_ratio or "3:4")
+    safe_width = max(512, min(int(width), 2048))
+    safe_height = max(512, int(round(safe_width / max(ratio, 0.25))))
+    return safe_width, safe_height
+
+
+def _decode_base64_image(image_b64: str) -> Image.Image:
+    payload = image_b64.split(",", 1)[1] if "," in image_b64 else image_b64
+    image_bytes = base64.b64decode(payload)
+    return Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+
+
+def _encode_image_base64(img: Image.Image) -> str:
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def _distance_rgb(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    return math.sqrt(sum((int(x) - int(y)) ** 2 for x, y in zip(a, b)))
+
+
+def _edge_background_seed(image: Image.Image) -> tuple[int, int, int]:
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    sample_points = [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+        (width // 2, 0),
+        (width // 2, height - 1),
+        (0, height // 2),
+        (width - 1, height // 2),
+    ]
+    colors = []
+    for x, y in sample_points:
+        r, g, b, a = rgba.getpixel((max(0, min(width - 1, x)), max(0, min(height - 1, y))))
+        if a > 0:
+            colors.append((r, g, b))
+    if not colors:
+        return (255, 255, 255)
+    return tuple(int(sum(channel) / len(colors)) for channel in zip(*colors))
+
+
+def _remove_background_heuristic(img: Image.Image) -> Image.Image:
+    rgba = img.convert("RGBA")
+    width, height = rgba.size
+    target = _edge_background_seed(rgba)
+    pixels = rgba.load()
+    visited = set()
+    stack = [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+        (width // 2, 0),
+        (width // 2, height - 1),
+        (0, height // 2),
+        (width - 1, height // 2),
+    ]
+    hard_threshold = 34
+    feather_threshold = 58
+
+    while stack:
+        x, y = stack.pop()
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+        if (x, y) in visited:
+            continue
+        visited.add((x, y))
+        r, g, b, a = pixels[x, y]
+        if a == 0:
+            continue
+        distance = _distance_rgb((r, g, b), target)
+        if distance > feather_threshold:
+            continue
+        if distance <= hard_threshold:
+            pixels[x, y] = (r, g, b, 0)
+        else:
+            alpha = int(255 * ((distance - hard_threshold) / max(1, feather_threshold - hard_threshold)))
+            pixels[x, y] = (r, g, b, alpha)
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in visited:
+                stack.append((nx, ny))
+    return rgba
+
+
+def _prepare_output_image(img: Image.Image, transparent_background: bool = False) -> Image.Image:
+    output = img.convert("RGBA")
+    if transparent_background:
+        output = _remove_background_heuristic(output)
+    return output
+
+
+def _fit_box_by_image(img_b64: str, max_width: int, max_height: int, fallback: int = 512) -> tuple[int, int]:
+    try:
+        img = _decode_base64_image(img_b64)
+        source_w, source_h = img.size
+        if source_w <= 0 or source_h <= 0:
+            raise ValueError("invalid image size")
+        scale = min(max_width / source_w, max_height / source_h)
+        return max(64, int(source_w * scale)), max(64, int(source_h * scale))
+    except Exception:
+        side = min(max_width, max_height, fallback)
+        return side, side
+
+
+def _parse_text_layers(value) -> List[dict]:
+    if not isinstance(value, list):
+        return []
+    layers = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        text = _safe_text(item.get("text"))
+        if not text:
+            continue
+        role = _safe_text(item.get("role"), "body").lower()
+        if role not in {"title", "subtitle", "body"}:
+            role = "body"
+        align = _safe_text(item.get("align"), "left").lower()
+        if align not in {"left", "center", "right"}:
+            align = "left"
+        layers.append(
+            {
+                "id": _safe_text(item.get("id"), f"text-{index + 1}"),
+                "name": _safe_text(item.get("name"), f"文字 {index + 1}"),
+                "text": text,
+                "role": role,
+                "color": _safe_text(item.get("color"), "#111827"),
+                "align": align,
+            }
+        )
+    return layers[:6]
+
+
+def _make_text_layer(
+    layer_id: str,
+    name: str,
+    text: str,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    z_index: int,
+    font_size: int = 72,
+    color: str = "#111827",
+    font_weight: int = 700,
+    align: str = "left",
+    background_color: Optional[str] = None,
+) -> dict:
+    return {
+        "id": layer_id,
+        "name": name,
+        "kind": "text",
+        "text": text,
+        "width": width,
+        "height": height,
+        "placement": {"x": x, "y": y, "z_index": z_index},
+        "style": {
+            "fontSize": font_size,
+            "fontWeight": font_weight,
+            "color": color,
+            "align": align,
+            "backgroundColor": background_color,
+            "padding": 24,
+            "lineHeight": 1.2,
+        },
+    }
+
+
+def _make_shape_layer(
+    layer_id: str,
+    name: str,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    z_index: int,
+    fill: str = "rgba(255,255,255,0.72)",
+    radius: int = 32,
+) -> dict:
+    return {
+        "id": layer_id,
+        "name": name,
+        "kind": "shape",
+        "width": width,
+        "height": height,
+        "placement": {"x": x, "y": y, "z_index": z_index},
+        "style": {"fill": fill, "radius": radius},
+    }
+
+
+def _aspect_layout_template(aspect_ratio: str) -> dict:
+    ratio = _parse_aspect_ratio(aspect_ratio or "3:4")
+    if ratio >= 1.45:
+        return {
+            "hero": (0.62, 0.56, 0.42),
+            "secondary": [(0.80, 0.68, 0.24), (0.70, 0.26, 0.18)],
+            "decor": [(0.16, 0.20, 0.14), (0.88, 0.18, 0.12), (0.18, 0.82, 0.12)],
+            "text_box": (0.08, 0.14, 0.38, 0.70),
+        }
+    if ratio >= 0.95:
+        return {
+            "hero": (0.58, 0.58, 0.48),
+            "secondary": [(0.22, 0.66, 0.24), (0.82, 0.24, 0.16)],
+            "decor": [(0.14, 0.18, 0.14), (0.84, 0.80, 0.12)],
+            "text_box": (0.08, 0.08, 0.44, 0.28),
+        }
+    return {
+        "hero": (0.53, 0.60, 0.56),
+        "secondary": [(0.18, 0.72, 0.22), (0.82, 0.30, 0.18)],
+        "decor": [(0.16, 0.18, 0.14), (0.86, 0.82, 0.10)],
+        "text_box": (0.08, 0.08, 0.56, 0.24),
+    }
+
+
+def _infer_scene_subject_count(chat_history: str, selected_options: dict, ui_state: Optional[dict] = None) -> int:
+    combined = f"{chat_history}\n{json.dumps(selected_options or {}, ensure_ascii=False)}\n{json.dumps(ui_state or {}, ensure_ascii=False)}"
+    if re.search(r"(多人|群像|三人|3人|三个主体|三位)", combined):
+        return 3
+    if re.search(r"(双人|二人|两人|2人|一对|两个主体)", combined):
+        return 2
+    return 1
+
+
+def _infer_text_requirement(chat_history: str, selected_options: dict, ui_state: Optional[dict] = None) -> dict:
+    combined = f"{chat_history}\n{json.dumps(selected_options or {}, ensure_ascii=False)}\n{json.dumps(ui_state or {}, ensure_ascii=False)}"
+    wants_copy = bool(re.search(r"海报|封面|标题|文案|宣传|主标题|副标题|slogan|标语|广告|poster", combined, re.I))
+    wants_badge = bool(re.search(r"活动|促销|新品|sale|折扣|限时|发售", combined, re.I))
+    wants_decor = wants_copy or bool(re.search(r"logo|边框|装饰|贴纸|icon|图标", combined, re.I))
+    return {"needs_copy": wants_copy, "needs_badge": wants_badge, "needs_decor": wants_decor}
+
+
+def _latest_user_prompt_from_chat_history(chat_history: str) -> str:
+    if not isinstance(chat_history, str) or not chat_history.strip():
+        return ""
+    lines = [line.strip() for line in chat_history.splitlines() if line.strip()]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if lowered.startswith("user:"):
+            return line.split(":", 1)[1].strip()
+    return lines[-1] if lines else ""
 
 
 def _create_layer(name: str, layer_type: str, prompt: str, width: int, height: int, x: int, y: int, z_index: int):
@@ -2316,21 +2912,24 @@ def generate_layout(req: LayoutRequest):
     return generate_llm_layout(req)
 
 
+@app.post("/scene/plan")
+def scene_plan(req: LayoutRequest):
+    """Stable scene-planning endpoint for the edit workspace."""
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    return build_scene_plan_payload(req)
+
+
 @app.post("/remove-background")
 def remove_background(payload: dict):
-    """Placeholder background removal; returns the original image as transparent PNG base64."""
+    """Heuristic background removal suitable for MVP usage."""
     image_b64 = payload.get("image_base64")
     if not image_b64:
         return JSONResponse(status_code=400, content={"error": "缺少 image_base64"})
     try:
-        if "," in image_b64:
-            image_b64 = image_b64.split(",")[1]
-        image_bytes = base64.b64decode(image_b64)
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        buffer.seek(0)
-        return {"image_base64": base64.b64encode(buffer.getvalue()).decode("utf-8")}
+        img = _decode_base64_image(image_b64)
+        output = _remove_background_heuristic(img)
+        return {"image_base64": _encode_image_base64(output)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"抠图失败: {e}"})
 
@@ -2350,10 +2949,20 @@ def generate_image(req: ImageRequest):
     pipe = None
     lora_models: List[str] = []
     try:
+        requested_transparency = bool(req.remove_background) or bool(req.transparent_background)
+        if not requested_transparency and (req.layer_type or "").strip().lower() not in {"", "background"}:
+            requested_transparency = True
         provider = _resolve_image_provider(req.image_provider)
         if provider == "siliconflow":
             image_b64 = _call_siliconflow_image(req.prompt, width, height, steps)
-            return {"image_base64": image_b64}
+            if requested_transparency:
+                processed = _prepare_output_image(_decode_base64_image(image_b64), transparent_background=True)
+                image_b64 = _encode_image_base64(processed)
+            return {
+                "image_base64": image_b64,
+                "transparent_background": requested_transparency,
+                "fallback_used": False,
+            }
 
         torch = _require_torch()
         base_model_id = req.base_model or BASE_MODEL_DEFAULT
@@ -2393,11 +3002,28 @@ def generate_image(req: ImageRequest):
             ).images[0]
 
         img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format="PNG")
+        output_image = _prepare_output_image(image, transparent_background=requested_transparency)
+        output_image.save(img_byte_arr, format="PNG")
         image_b64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
-        return {"image_base64": image_b64}
+        return {
+            "image_base64": image_b64,
+            "transparent_background": requested_transparency,
+            "fallback_used": False,
+        }
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        fallback_b64 = _build_fallback_generated_image(
+            req.prompt,
+            width=width,
+            height=height,
+            layer_type=req.layer_type,
+            transparent_background=requested_transparency,
+        )
+        return {
+            "image_base64": fallback_b64,
+            "transparent_background": requested_transparency,
+            "fallback_used": True,
+            "fallback_reason": str(e),
+        }
     finally:
         if pipe is not None and lora_models:
             with _pipe_lock:
@@ -2405,6 +3031,12 @@ def generate_image(req: ImageRequest):
                     pipe.unload_lora_weights()
                 except Exception:
                     pass
+
+
+@app.post("/scene/materials/generate")
+def scene_generate_material(req: ImageRequest):
+    """Stable material-generation endpoint for a single slot."""
+    return generate_image(req)
 
 
 @app.post("/generate-layered")
@@ -2443,88 +3075,271 @@ def generate_layered(req: LayeredRequest):
 
 @app.post("/compose-materials")
 def compose_materials(payload: dict):
-    """Auto-layout given materials with simple stacking."""
+    """Compose image/text/shape layers into an aspect-aware preview layout."""
     materials = payload.get("materials") or []
+    text_layers = _parse_text_layers(payload.get("text_layers"))
+    text_panel_fill = _safe_text(payload.get("text_panel_fill"), "rgba(255,255,255,0.78)")
     aspect_ratio = payload.get("aspect_ratio") or "3:4"
-    ratio = _parse_aspect_ratio(aspect_ratio)
-    base_w = 768
-    bg_w = base_w
-    bg_h = int(base_w / ratio)
+    bg_w, bg_h = _aspect_size(aspect_ratio, width=1536)
+    template = _aspect_layout_template(aspect_ratio)
+
+    typed_materials = []
+    for idx, mat in enumerate(materials):
+        if not isinstance(mat, dict):
+            continue
+        typed_materials.append(
+            {
+                "id": _safe_text(mat.get("id"), f"material-{idx + 1}"),
+                "name": _safe_text(mat.get("name"), f"素材 {idx + 1}"),
+                "layer_type": _safe_text(mat.get("layer_type"), "subject"),
+                "image_base64": _safe_text(mat.get("image_base64")),
+            }
+        )
+
+    subjects = [item for item in typed_materials if item["layer_type"] == "subject"]
+    decors = [item for item in typed_materials if item["layer_type"] == "decor"]
 
     layout_layers = []
-    positions = [
-        (int(bg_w * 0.2), int(bg_h * 0.25)),
-        (int(bg_w * 0.55), int(bg_h * 0.25)),
-        (int(bg_w * 0.2), int(bg_h * 0.6)),
-        (int(bg_w * 0.55), int(bg_h * 0.6)),
-    ]
-    for idx, mat in enumerate(materials):
-        name = mat.get("name") or f"素材{idx+1}"
-        layer_type = mat.get("layer_type") or "subject"
-        img_b64 = mat.get("image_base64") or _build_placeholder_image(name, 512, 512)
-        x, y = positions[idx % len(positions)]
-        layer = {
-            "id": f"compose-{idx}",
-            "name": name,
-            "layer_type": layer_type,
-            "image_base64": img_b64,
-            "width": 512,
-            "height": 512,
-            "placement": {"x": x, "y": y, "z_index": idx + 1},
-        }
-        layout_layers.append(layer)
+    z_index = 1
+
+    if subjects:
+        hero = subjects[0]
+        center_x, center_y, size_ratio = template["hero"]
+        max_box = int(min(bg_w, bg_h) * size_ratio)
+        hero_w, hero_h = _fit_box_by_image(hero["image_base64"], max_box, max_box)
+        layout_layers.append(
+            {
+                "id": hero["id"],
+                "name": hero["name"],
+                "kind": "image",
+                "layer_type": hero["layer_type"],
+                "image_base64": hero["image_base64"] or _build_placeholder_image(hero["name"], hero_w, hero_h),
+                "width": hero_w,
+                "height": hero_h,
+                "placement": {
+                    "x": int(bg_w * center_x - hero_w / 2),
+                    "y": int(bg_h * center_y - hero_h / 2),
+                    "z_index": z_index,
+                },
+            }
+        )
+        z_index += 1
+
+    for idx, item in enumerate(subjects[1:]):
+        anchor_x, anchor_y, size_ratio = template["secondary"][idx % len(template["secondary"])]
+        max_box = int(min(bg_w, bg_h) * size_ratio)
+        item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box)
+        layout_layers.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "kind": "image",
+                "layer_type": item["layer_type"],
+                "image_base64": item["image_base64"] or _build_placeholder_image(item["name"], item_w, item_h),
+                "width": item_w,
+                "height": item_h,
+                "placement": {
+                    "x": int(bg_w * anchor_x - item_w / 2),
+                    "y": int(bg_h * anchor_y - item_h / 2),
+                    "z_index": z_index,
+                },
+            }
+        )
+        z_index += 1
+
+    for idx, item in enumerate(decors):
+        anchor_x, anchor_y, size_ratio = template["decor"][idx % len(template["decor"])]
+        max_box = int(min(bg_w, bg_h) * size_ratio)
+        item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box, fallback=max_box)
+        layout_layers.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "kind": "image",
+                "layer_type": item["layer_type"],
+                "image_base64": item["image_base64"] or _build_placeholder_image(item["name"], item_w, item_h),
+                "width": item_w,
+                "height": item_h,
+                "placement": {
+                    "x": int(bg_w * anchor_x - item_w / 2),
+                    "y": int(bg_h * anchor_y - item_h / 2),
+                    "z_index": z_index,
+                },
+            }
+        )
+        z_index += 1
+
+    if text_layers:
+        box_x_ratio, box_y_ratio, box_w_ratio, box_h_ratio = template["text_box"]
+        panel_x = int(bg_w * box_x_ratio)
+        panel_y = int(bg_h * box_y_ratio)
+        panel_w = int(bg_w * box_w_ratio)
+        panel_h = int(bg_h * box_h_ratio)
+        layout_layers.append(
+            _make_shape_layer(
+                "text-panel",
+                "文字底板",
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                z_index,
+                fill=text_panel_fill,
+                radius=32,
+            )
+        )
+        z_index += 1
+
+        cursor_y = panel_y + 32
+        max_text_width = panel_w - 64
+        for idx, layer in enumerate(text_layers):
+            role = layer["role"]
+            if role == "title":
+                font_size = 92 if bg_w >= bg_h else 84
+                box_h = int(panel_h * 0.34)
+                font_weight = 800
+            elif role == "subtitle":
+                font_size = 52
+                box_h = int(panel_h * 0.22)
+                font_weight = 700
+            else:
+                font_size = 36
+                box_h = int(panel_h * 0.18)
+                font_weight = 500
+            layout_layers.append(
+                _make_text_layer(
+                    layer["id"],
+                    layer["name"],
+                    layer["text"],
+                    panel_x + 24,
+                    cursor_y,
+                    max_text_width,
+                    box_h,
+                    z_index,
+                    font_size=font_size,
+                    color=layer["color"],
+                    font_weight=font_weight,
+                    align=layer["align"],
+                )
+            )
+            cursor_y += box_h
+            z_index += 1
 
     return {
         "aspect_ratio": aspect_ratio,
         "layers": layout_layers,
+        "canvas_width": bg_w,
+        "canvas_height": bg_h,
     }
+
+
+@app.post("/scene/preview")
+def scene_preview(req: ScenePreviewRequest):
+    """Stable preview-composition endpoint for the edit workspace."""
+    return compose_materials(
+        {
+            "aspect_ratio": req.aspect_ratio,
+            "materials": req.materials or [],
+            "text_layers": req.text_layers or [],
+            "text_panel_fill": req.text_panel_fill,
+        }
+    )
 
 
 @app.post("/analyze-layer-plan")
 def analyze_layer_plan(payload: dict):
-    """Placeholder for LiteDraw layer plan analysis."""
+    """Infer a lightweight but more realistic layer plan for scene composition."""
     chat_history = payload.get("chat_history") or ""
     selected = payload.get("selected_options") or {}
     ui_state = payload.get("ui_state") or {}
-    prompt_hint = (chat_history.splitlines()[-1] if chat_history else "") or "scene"
+    aspect_ratio = (
+        payload.get("aspect_ratio")
+        or selected.get("画幅比例", ["3:4"])[0]
+        or "3:4"
+    )
+    prompt_hint = _latest_user_prompt_from_chat_history(chat_history) or "scene"
+    subject_count = _infer_scene_subject_count(chat_history, selected, ui_state)
+    text_meta = _infer_text_requirement(chat_history, selected, ui_state)
+    ratio = _parse_aspect_ratio(aspect_ratio)
+    if ratio >= 1.45:
+        subject_positions = [(0.62, 0.56), (0.80, 0.66), (0.72, 0.30)]
+        decor_positions = [(0.15, 0.18), (0.88, 0.18)]
+        text_safe_zone = {"x": 0.08, "y": 0.12, "w": 0.38, "h": 0.72}
+    elif ratio >= 0.95:
+        subject_positions = [(0.58, 0.58), (0.22, 0.66), (0.82, 0.28)]
+        decor_positions = [(0.14, 0.18), (0.84, 0.82)]
+        text_safe_zone = {"x": 0.08, "y": 0.08, "w": 0.44, "h": 0.28}
+    else:
+        subject_positions = [(0.53, 0.60), (0.18, 0.72), (0.82, 0.30)]
+        decor_positions = [(0.16, 0.18), (0.86, 0.82)]
+        text_safe_zone = {"x": 0.08, "y": 0.08, "w": 0.56, "h": 0.24}
+
+    layer_plan = [
+        {
+            "layer_id": "background",
+            "layer_name": "背景",
+            "layer_type": "background",
+            "enabled": True,
+            "order": 0,
+            "prompt": f"{prompt_hint}，完整场景背景",
+            "placement": {"x": 0.0, "y": 0.0},
+            "generation_params": {"needs_transparent_bg": False, "aspect_ratio": aspect_ratio},
+        }
+    ]
+
+    for index in range(subject_count):
+        pos_x, pos_y = subject_positions[index]
+        layer_plan.append(
+            {
+                "layer_id": f"subject-{index + 1}",
+                "layer_name": f"主体 {index + 1}",
+                "layer_type": "subject",
+                "enabled": True,
+                "order": len(layer_plan),
+                "prompt": f"{prompt_hint}，主体 {index + 1}",
+                "placement": {"x": pos_x, "y": pos_y},
+                "generation_params": {"needs_transparent_bg": True, "size_hint": "hero" if index == 0 else "secondary"},
+            }
+        )
+
+    if text_meta["needs_decor"]:
+        for index, (pos_x, pos_y) in enumerate(decor_positions[:2]):
+            layer_plan.append(
+                {
+                    "layer_id": f"decor-{index + 1}",
+                    "layer_name": f"装饰 {index + 1}",
+                    "layer_type": "decor",
+                    "enabled": True,
+                    "order": len(layer_plan),
+                    "prompt": f"{prompt_hint}，装饰元素 {index + 1}",
+                    "placement": {"x": pos_x, "y": pos_y},
+                    "generation_params": {"needs_transparent_bg": True, "size_hint": "decor"},
+                }
+            )
+
+    if text_meta["needs_copy"]:
+        layer_plan.append(
+            {
+                "layer_id": "text-safe-zone",
+                "layer_name": "文字安全区",
+                "layer_type": "decor",
+                "enabled": True,
+                "order": len(layer_plan),
+                "prompt": "文字与文案排版区域",
+                "placement": text_safe_zone,
+                "generation_params": {"needs_transparent_bg": False, "kind": "text-panel"},
+            }
+        )
+
     plan = {
-        "estimated_layers": 3,
-        "estimated_time_seconds": 10,
-        "layer_plan": [
-            {
-                "layer_id": "background",
-                "layer_name": "背景",
-                "layer_type": "background",
-                "enabled": True,
-                "order": 0,
-                "prompt": prompt_hint,
-                "placement": {"x": 0.0, "y": 0.0},
-                "generation_params": {"needs_transparent_bg": False},
-            },
-            {
-                "layer_id": "subject-1",
-                "layer_name": "主体 1",
-                "layer_type": "subject",
-                "enabled": True,
-                "order": 1,
-                "prompt": prompt_hint,
-                "placement": {"x": 0.35, "y": 0.45},
-                "generation_params": {"needs_transparent_bg": True},
-            },
-            {
-                "layer_id": "subject-2",
-                "layer_name": "主体 2",
-                "layer_type": "subject",
-                "enabled": True,
-                "order": 2,
-                "prompt": prompt_hint,
-                "placement": {"x": 0.65, "y": 0.55},
-                "generation_params": {"needs_transparent_bg": True},
-            },
-        ],
+        "estimated_layers": len(layer_plan),
+        "estimated_time_seconds": max(8, len(layer_plan) * 6),
+        "layer_plan": layer_plan,
         "meta": {
+            "aspect_ratio": aspect_ratio,
             "selected_options": selected,
             "ui_state": ui_state,
+            "text_requirement": text_meta,
         },
     }
     return plan

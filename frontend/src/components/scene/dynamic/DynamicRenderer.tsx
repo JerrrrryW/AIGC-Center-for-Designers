@@ -23,6 +23,7 @@ import {
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import { api } from '../../../api';
 
 export type LayoutConfig = {
@@ -61,6 +62,7 @@ type BaseComponent = {
   title?: string;
   type: string;
   default?: any;
+  helperText?: string;
 };
 
 type TextInputComponent = BaseComponent & {
@@ -267,6 +269,7 @@ type SectionCardProps = {
   cardType?: string;
   gridColumn?: any;
   cardToneStyle?: Record<string, any>;
+  headerActions?: React.ReactNode;
   state: Record<string, any>;
   onStateChange: (componentId: string, value: any) => void;
   onSlotUpload: (componentId: string, slotId: string, file: File) => void;
@@ -280,6 +283,7 @@ export const SectionCard: React.FC<SectionCardProps> = ({
   cardType,
   gridColumn,
   cardToneStyle,
+  headerActions,
   state,
   onStateChange,
   onSlotUpload,
@@ -294,25 +298,29 @@ export const SectionCard: React.FC<SectionCardProps> = ({
       sx={{
         gridColumn,
         minWidth: 0,
-        height: '100%',
         boxShadow: '0 12px 28px rgba(15, 23, 42, 0.08)',
         borderRadius: 2,
         alignSelf: 'start',
         ...cardToneStyle,
       }}
     >
-      <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-        {section.title ? (
-          <Typography variant="h6" gutterBottom>
-            {section.title}
-          </Typography>
+      <CardContent sx={{ display: 'flex', flexDirection: 'column' }}>
+        {section.title || headerActions ? (
+          <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: section.description ? 0.5 : 1 }}>
+            {section.title ? (
+              <Typography variant="h6">
+                {section.title}
+              </Typography>
+            ) : <Box />}
+            {headerActions ? <Box>{headerActions}</Box> : null}
+          </Stack>
         ) : null}
         {section.description ? (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
             {section.description}
           </Typography>
         ) : null}
-        <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        <Box>
           <Stack spacing={2}>
             {(section.components ?? []).map((component) => (
               <Box key={component.id}>
@@ -967,6 +975,7 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
               );
             })}
           </ToggleButtonGroup>
+          {component.helperText ? <FormHelperText>{component.helperText}</FormHelperText> : null}
         </Box>
       );
     }
@@ -1002,7 +1011,7 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
       return (
         <MediaUploaderField
           title={component.title || component.label || '素材'}
-          slots={Array.isArray(value) ? value : component.slots}
+          slots={Array.isArray(value) ? value : Array.isArray(component.slots) ? component.slots : []}
           onSlotChange={onChange}
           onSlotUpload={onSlotUpload}
           onSlotGenerate={onSlotGenerate}
@@ -1036,6 +1045,7 @@ const MediaUploaderField: React.FC<MediaUploaderFieldProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploadTarget, setUploadTarget] = useState<string | null>(null);
+  const safeSlots = Array.isArray(slots) ? slots : [];
 
   const handlePickUpload = (slotId: string) => {
     setUploadTarget(slotId);
@@ -1051,7 +1061,7 @@ const MediaUploaderField: React.FC<MediaUploaderFieldProps> = ({
   };
 
   const updateSlot = (slotId: string, updater: (slot: MediaSlot) => MediaSlot) => {
-    const next = slots.map((s) => (s.id === slotId ? updater(s) : s));
+    const next = safeSlots.map((s) => (s.id === slotId ? updater(s) : s));
     onSlotChange(next);
   };
 
@@ -1061,56 +1071,101 @@ const MediaUploaderField: React.FC<MediaUploaderFieldProps> = ({
         {title}
       </Typography>
       <Stack spacing={2}>
-        {slots.map((slot) => (
-          <Card key={slot.id} variant="outlined">
+        {!safeSlots.length ? (
+          <Card variant="outlined">
             <CardContent>
-              <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
-                <Box>
-                  <Typography variant="subtitle1">{slot.label}</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {slot.layerType}
-                  </Typography>
-                </Box>
-                <Stack direction="row" spacing={1}>
-                  <IconButton
-                    onClick={() => handlePickUpload(slot.id)}
-                    disabled={disabled}
-                    title="上传"
-                  >
-                    <UploadFileIcon />
-                  </IconButton>
-                  <IconButton
-                    onClick={() => onSlotGenerate(slot)}
-                    disabled={disabled}
-                    title="生成"
-                  >
-                    <AutoAwesomeIcon />
-                  </IconButton>
-                  <IconButton
-                    onClick={() => onSlotRemoveBackground(slot)}
-                    disabled={disabled || slot.layerType === 'background' || !slot.uri}
-                    title="抠图"
-                  >
-                    <ContentCutIcon />
-                  </IconButton>
-                </Stack>
-              </Stack>
-              {slot.uri ? (
-                <Box sx={{ mt: 1 }}>
-                  <img
-                    src={slot.uri}
-                    alt={slot.label}
-                    style={{ maxWidth: '100%', borderRadius: 8 }}
-                  />
-                </Box>
-              ) : (
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  未准备素材（可上传或生成）
-                </Typography>
-              )}
+              <Typography variant="body2" color="text.secondary">
+                当前没有可用的素材图层。通常是布局返回了 `media-uploader`，但没有带上 `slots`。
+              </Typography>
             </CardContent>
           </Card>
-        ))}
+        ) : null}
+        {safeSlots.map((slot) => {
+          const expectsTransparent = slot.layerType !== 'background';
+          return (
+            <Card key={slot.id} variant="outlined">
+              <CardContent>
+                <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
+                  <Box>
+                    <Typography variant="subtitle1">{slot.label}</Typography>
+                    <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                      <Typography variant="caption" color="text.secondary">
+                        {slot.layerType}
+                      </Typography>
+                      {expectsTransparent ? (
+                        <Chip
+                          size="small"
+                          label={slot.hasTransparentBg ? '透明底' : '建议透明底'}
+                          color={slot.hasTransparentBg ? 'success' : 'default'}
+                        />
+                      ) : null}
+                    </Stack>
+                  </Box>
+                  <Stack direction="row" spacing={1}>
+                    <IconButton
+                      onClick={() => handlePickUpload(slot.id)}
+                      disabled={disabled}
+                      title="上传"
+                    >
+                      <UploadFileIcon />
+                    </IconButton>
+                    <IconButton
+                      onClick={() => onSlotGenerate(slot)}
+                      disabled={disabled}
+                      title="生成"
+                    >
+                      <AutoAwesomeIcon />
+                    </IconButton>
+                    <IconButton
+                      onClick={() => onSlotRemoveBackground(slot)}
+                      disabled={disabled || slot.layerType === 'background' || !slot.uri}
+                      title="抠图"
+                    >
+                      <ContentCutIcon />
+                    </IconButton>
+                    <IconButton
+                      onClick={() => updateSlot(slot.id, (prev) => ({ ...prev, uri: undefined, hasTransparentBg: false }))}
+                      disabled={disabled || !slot.uri}
+                      title="清除"
+                    >
+                      <DeleteOutlineIcon />
+                    </IconButton>
+                  </Stack>
+                </Stack>
+
+                <TextField
+                  label="该图层提示词"
+                  value={slot.prompt || ''}
+                  onChange={(event) => updateSlot(slot.id, (prev) => ({ ...prev, prompt: event.target.value }))}
+                  fullWidth
+                  multiline
+                  minRows={2}
+                  disabled={disabled}
+                  sx={{ mt: 1.5 }}
+                  helperText={
+                    expectsTransparent
+                      ? '主体/装饰层会优先按透明底生成，便于后续拼版。'
+                      : '背景层建议写完整场景、景深和光影。'
+                  }
+                />
+
+                {slot.uri ? (
+                  <Box sx={{ mt: 1 }}>
+                    <img
+                      src={slot.uri}
+                      alt={slot.label}
+                      style={{ maxWidth: '100%', borderRadius: 8 }}
+                    />
+                  </Box>
+                ) : (
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    未准备素材（可上传或生成）
+                  </Typography>
+                )}
+              </CardContent>
+            </Card>
+          );
+        })}
       </Stack>
       <input
         ref={fileInputRef}
