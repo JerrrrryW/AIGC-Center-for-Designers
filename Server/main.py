@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import math
 import shutil
 import os
@@ -43,6 +43,7 @@ LAYOUT_SCHEMA_VERSION = "1.3"
 _COMPONENT_LIBRARY_PATH = os.path.join(os.path.dirname(__file__), "component_library.json")
 _COMPONENT_LIBRARY_CACHE = None
 llm_runtime_config = {
+    "provider": None,
     "api_key": None,
     "base_url": None,
     "model": None,
@@ -52,6 +53,7 @@ llm_runtime_config = {
     "image_model": None,
 }
 IMAGE_PROVIDER_ENV = "IMAGE_GENERATION_PROVIDER"
+MODEL_PROVIDER_ENV = "AIGC_MODEL_PROVIDER"
 _pipe_cache = {
     "base_model": None,
     "pipe": None,
@@ -240,6 +242,7 @@ class TextRequest(BaseModel):
 
 
 class LlmConfigRequest(BaseModel):
+    provider: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     model: Optional[str] = None
@@ -262,6 +265,10 @@ class ImageRequest(BaseModel):
     layer_type: Optional[str] = None
     transparent_background: Optional[bool] = False
     remove_background: Optional[bool] = None
+    reference_image_base64: Optional[str] = None
+    reference_bbox: Optional[dict] = None
+    scene_graph: Optional[dict] = None
+    reference_prompt: Optional[str] = None
 
 
 class LayoutRequest(BaseModel):
@@ -275,6 +282,7 @@ class ScenePreviewRequest(BaseModel):
     materials: Optional[List[dict]] = None
     text_layers: Optional[List[dict]] = None
     text_panel_fill: Optional[str] = None
+    scene_graph: Optional[dict] = None
 
 
 class LayeredRequest(BaseModel):
@@ -326,6 +334,7 @@ def get_llm_config():
     config = _resolve_llm_config()
     image_config = _resolve_image_config()
     return {
+        "provider": config.get("provider"),
         "api_key_set": bool(config.get("api_key")),
         "base_url": config.get("base_url"),
         "model": config.get("model"),
@@ -338,6 +347,9 @@ def get_llm_config():
 
 @app.post("/llm-config")
 def set_llm_config(req: LlmConfigRequest):
+    if req.provider is not None:
+        provider = req.provider.strip().lower()
+        llm_runtime_config["provider"] = provider or None
     if req.api_key is not None:
         api_key = req.api_key.strip()
         llm_runtime_config["api_key"] = api_key or None
@@ -361,6 +373,7 @@ def set_llm_config(req: LlmConfigRequest):
     config = _resolve_llm_config()
     image_config = _resolve_image_config()
     return {
+        "provider": config.get("provider"),
         "status": "ok",
         "api_key_set": bool(config.get("api_key")),
         "base_url": config.get("base_url"),
@@ -391,31 +404,92 @@ def _resolve_llm_temperature() -> float:
     return 0.4
 
 
+def _resolve_model_provider() -> str:
+    provider = (llm_runtime_config.get("provider") or "").strip().lower()
+    if not provider:
+        provider = os.getenv(MODEL_PROVIDER_ENV, "").strip().lower()
+    if provider not in {"gemini", "siliconflow"}:
+        provider = "gemini"
+    return provider
+
+
+def _provider_default_base_url(provider: str) -> str:
+    if provider == "gemini":
+        return "https://generativelanguage.googleapis.com/v1beta"
+    return "https://api.siliconflow.cn/v1/chat/completions"
+
+
+def _provider_default_model(provider: str) -> str:
+    if provider == "gemini":
+        return "gemini-3-flash-preview"
+    return "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+
+def _provider_default_image_base_url(provider: str) -> str:
+    if provider == "gemini":
+        return "https://generativelanguage.googleapis.com/v1beta"
+    return "https://api.siliconflow.cn/v1"
+
+
+def _provider_default_image_model(provider: str) -> str:
+    if provider == "gemini":
+        return "gemini-3.1-flash-image-preview"
+    return "Qwen/Qwen-Image"
+
+
+def _match_gemini_aspect_ratio(width: int, height: int) -> str:
+    supported = [
+        "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1",
+        "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+    ]
+    target = max(1e-6, float(width) / float(max(1, height)))
+    best = "1:1"
+    best_delta = float("inf")
+    for ratio in supported:
+        left, right = ratio.split(":")
+        numeric = float(left) / float(right)
+        delta = abs(numeric - target)
+        if delta < best_delta:
+            best = ratio
+            best_delta = delta
+    return best
+
+
+def _resolve_gemini_image_size(width: int, height: int) -> str:
+    edge = max(int(width or 0), int(height or 0))
+    if edge <= 512:
+        return "512"
+    if edge <= 1400:
+        return "1K"
+    if edge <= 2400:
+        return "2K"
+    return "4K"
+
+
 def _resolve_llm_config() -> dict:
+    provider = _resolve_model_provider()
     api_key = (llm_runtime_config.get("api_key") or "").strip()
     if not api_key:
-        api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
-    if not api_key:
-        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        env_key = "GEMINI_API_KEY" if provider == "gemini" else "SILICONFLOW_API_KEY"
+        api_key = os.getenv(env_key, "").strip()
     base_url = (llm_runtime_config.get("base_url") or "").strip()
     if not base_url:
-        base_url = os.getenv("SILICONFLOW_BASE_URL", "").strip()
-    if not base_url:
-        base_url = os.getenv("GEMINI_BASE_URL", "").strip()
-    base_url = base_url or "https://api.siliconflow.cn/v1/chat/completions"
+        env_key = "GEMINI_BASE_URL" if provider == "gemini" else "SILICONFLOW_BASE_URL"
+        base_url = os.getenv(env_key, "").strip()
+    base_url = base_url or _provider_default_base_url(provider)
     model = (llm_runtime_config.get("model") or "").strip()
     if not model:
-        model = os.getenv("SILICONFLOW_MODEL", "").strip()
-    if not model:
-        model = os.getenv("GEMINI_MODEL", "").strip()
-    model = model or "Qwen/Qwen3-30B-A3B-Instruct-2507"
+        env_key = "GEMINI_MODEL" if provider == "gemini" else "SILICONFLOW_MODEL"
+        model = os.getenv(env_key, "").strip()
+    model = model or _provider_default_model(provider)
     temperature = _resolve_llm_temperature()
     return {
+        "provider": provider,
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
         "temperature": temperature,
-}
+    }
 
 
 def _llm_enabled() -> bool:
@@ -423,20 +497,26 @@ def _llm_enabled() -> bool:
 
 
 def _resolve_image_config() -> dict:
+    provider = _resolve_model_provider()
     api_key = (llm_runtime_config.get("image_api_key") or "").strip()
     if not api_key:
         api_key = (llm_runtime_config.get("api_key") or "").strip()
     if not api_key:
-        api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
+        env_key = "GEMINI_API_KEY" if provider == "gemini" else "SILICONFLOW_API_KEY"
+        api_key = os.getenv(env_key, "").strip()
     base_url = (llm_runtime_config.get("image_base_url") or "").strip()
     if not base_url:
-        base_url = os.getenv("SILICONFLOW_IMAGE_BASE_URL", "").strip()
-    base_url = base_url or "https://api.siliconflow.cn/v1"
+        env_key = "GEMINI_IMAGE_BASE_URL" if provider == "gemini" else "SILICONFLOW_IMAGE_BASE_URL"
+        fallback_env = "GEMINI_BASE_URL" if provider == "gemini" else "SILICONFLOW_BASE_URL"
+        base_url = os.getenv(env_key, "").strip() or os.getenv(fallback_env, "").strip()
+    base_url = base_url or _provider_default_image_base_url(provider)
     model = (llm_runtime_config.get("image_model") or "").strip()
     if not model:
-        model = os.getenv("SILICONFLOW_IMAGE_MODEL", "").strip()
-    model = model or "Qwen/Qwen-Image"
+        env_key = "GEMINI_IMAGE_MODEL" if provider == "gemini" else "SILICONFLOW_IMAGE_MODEL"
+        model = os.getenv(env_key, "").strip()
+    model = model or _provider_default_image_model(provider)
     return {
+        "provider": provider,
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
@@ -448,6 +528,11 @@ def _siliconflow_image_enabled() -> bool:
 
 
 def _resolve_llm_provider(config: dict) -> str:
+    provider = (config.get("provider") or "").strip().lower()
+    if provider in {"gemini", "openai_compatible"}:
+        return "gemini" if provider == "gemini" else provider
+    if provider == "siliconflow":
+        return "openai_compatible"
     base_url = (config.get("base_url") or "").strip().lower()
     if not base_url:
         return "openai_compatible"
@@ -566,7 +651,7 @@ def _call_gemini_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
         payload["contents"] = [{"role": "user", "parts": [{"text": ""}]}]
     payload["generationConfig"] = {
         "temperature": temperature,
-        "response_mime_type": "application/json",
+        "responseMimeType": "application/json",
     }
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -588,6 +673,135 @@ def _call_gemini_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
     return _extract_gemini_text(parsed)
 
 
+def _gemini_inline_image_part(image_b64: str, mime_type: str = "image/png") -> dict:
+    cleaned = _safe_text(image_b64)
+    if cleaned.startswith("data:"):
+        header, _, payload = cleaned.partition(",")
+        if payload:
+            cleaned = payload
+            mime_match = re.match(r"data:([^;]+);base64", header, re.IGNORECASE)
+            if mime_match:
+                mime_type = mime_match.group(1)
+    return {
+        "inline_data": {
+            "mime_type": mime_type,
+            "data": cleaned,
+        }
+    }
+
+
+def _extract_gemini_inline_image(parsed: dict) -> Optional[str]:
+    if not isinstance(parsed, dict):
+        return None
+    for cand in parsed.get("candidates") or []:
+        content = cand.get("content") or {}
+        for part in content.get("parts") or []:
+            blob = part.get("inlineData") or part.get("inline_data") or {}
+            data = blob.get("data")
+            if isinstance(data, str) and data.strip():
+                return data.strip()
+    return None
+
+
+def _call_gemini_generate_content(
+    *,
+    parts: List[dict],
+    model: Optional[str] = None,
+    response_mime_type: Optional[str] = None,
+    response_modalities: Optional[List[str]] = None,
+    image_config: Optional[dict] = None,
+    system_instruction: Optional[str] = None,
+    temperature: Optional[float] = None,
+    timeout_seconds: int = 120,
+) -> dict:
+    image_runtime_config = _resolve_image_config()
+    config = _resolve_llm_config()
+    api_key = (image_runtime_config.get("api_key") or config.get("api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("Gemini API Key 未设置")
+    endpoint = _build_gemini_endpoint(
+        image_runtime_config.get("base_url") or config.get("base_url"),
+        model or image_runtime_config.get("model") or config.get("model"),
+    )
+    payload: Dict[str, Any] = {
+        "contents": [{"role": "user", "parts": parts or [{"text": ""}]}],
+        "generationConfig": {},
+    }
+    if response_mime_type:
+        payload["generationConfig"]["responseMimeType"] = response_mime_type
+    if response_modalities:
+        payload["generationConfig"]["responseModalities"] = response_modalities
+    if image_config:
+        payload["generationConfig"]["imageConfig"] = image_config
+    payload["generationConfig"]["temperature"] = (
+        float(temperature) if temperature is not None else float(config.get("temperature") or 0.4)
+    )
+    if system_instruction:
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        method="POST",
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini 多模态调用失败: {body}") from e
+    return json.loads(body)
+
+
+def _call_gemini_image(
+    prompt: str,
+    *,
+    width: int,
+    height: int,
+    reference_image_b64: Optional[str] = None,
+    transparent_background: bool = False,
+    timeout_seconds: int = 180,
+) -> str:
+    image_config = _resolve_image_config()
+    aspect_ratio = _match_gemini_aspect_ratio(width, height)
+    image_size = _resolve_gemini_image_size(width, height)
+    parts = [
+        {
+            "text": (
+                f"Generate a single PNG image for this request. "
+                f"{'Use a transparent background and isolate the requested object.' if transparent_background else 'Return a complete scene image.'} "
+                f"User brief: {prompt}"
+            )
+        }
+    ]
+    if reference_image_b64:
+        parts.append(_gemini_inline_image_part(reference_image_b64))
+        parts.append(
+            {
+                "text": "Use the reference image only to preserve composition, depth, and object relationship. Do not add extra objects."
+            }
+        )
+    parsed = _call_gemini_generate_content(
+        parts=parts,
+        model=image_config.get("model"),
+        response_modalities=["IMAGE", "TEXT"],
+        image_config={
+            "aspectRatio": aspect_ratio,
+            "imageSize": image_size,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    image_b64 = _extract_gemini_inline_image(parsed)
+    if not image_b64:
+        text = _extract_gemini_text(parsed)
+        raise RuntimeError(f"Gemini 未返回图片数据: {text or parsed}")
+    return image_b64
+
+
 def _call_llm_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
     config = _resolve_llm_config()
     provider = _resolve_llm_provider(config)
@@ -599,13 +813,15 @@ def _call_llm_chat(messages: List[dict], timeout_seconds: int = 60) -> str:
 def _resolve_image_provider(requested: Optional[str]) -> str:
     provider = (requested or os.getenv(IMAGE_PROVIDER_ENV, "")).strip().lower()
     if not provider:
-        provider = "siliconflow" if _siliconflow_image_enabled() else "local"
+        provider = _resolve_model_provider()
     if provider == "auto":
-        return "siliconflow" if _siliconflow_image_enabled() else "local"
-    if provider not in {"siliconflow", "local"}:
+        return _resolve_model_provider()
+    if provider not in {"gemini", "siliconflow", "local"}:
         raise RuntimeError(f"不支持的生图链路：{provider}")
     if provider == "siliconflow" and not _siliconflow_image_enabled():
         raise RuntimeError("SILICONFLOW_API_KEY 未设置")
+    if provider == "gemini" and not _resolve_image_config().get("api_key"):
+        raise RuntimeError("GEMINI_API_KEY 未设置")
     return provider
 
 
@@ -2106,6 +2322,253 @@ def _extract_scene_materials_from_layout(layout_config: dict) -> dict:
     return grouped
 
 
+def _default_scene_bbox(layer_type: str, index: int) -> dict:
+    if layer_type == "background":
+        return {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+    if layer_type == "decor":
+        presets = [
+            {"x": 0.08, "y": 0.08, "w": 0.18, "h": 0.18},
+            {"x": 0.74, "y": 0.08, "w": 0.18, "h": 0.18},
+            {"x": 0.1, "y": 0.72, "w": 0.16, "h": 0.16},
+        ]
+        return presets[index % len(presets)]
+    presets = [
+        {"x": 0.38, "y": 0.30, "w": 0.28, "h": 0.44},
+        {"x": 0.12, "y": 0.44, "w": 0.22, "h": 0.34},
+        {"x": 0.68, "y": 0.18, "w": 0.2, "h": 0.3},
+    ]
+    return presets[index % len(presets)]
+
+
+def _clamp_ratio(value: Any, fallback: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0.0, min(1.0, numeric))
+
+
+def _normalize_scene_bbox(value: dict, fallback: dict) -> dict:
+    if not isinstance(value, dict):
+        return fallback
+    return {
+        "x": _clamp_ratio(value.get("x"), fallback.get("x", 0.0)),
+        "y": _clamp_ratio(value.get("y"), fallback.get("y", 0.0)),
+        "w": _clamp_ratio(value.get("w"), fallback.get("w", 1.0)),
+        "h": _clamp_ratio(value.get("h"), fallback.get("h", 1.0)),
+    }
+
+
+def _build_scene_graph_from_layer_plan(layer_plan_payload: dict, draft: dict) -> dict:
+    plan_layers = layer_plan_payload.get("layer_plan") or []
+    objects = []
+    decor_index = 0
+    subject_index = 0
+    text_safe_zone = {"x": 0.08, "y": 0.1, "w": 0.36, "h": 0.28}
+    for raw_layer in plan_layers:
+        if not isinstance(raw_layer, dict):
+            continue
+        layer_type = _safe_text(raw_layer.get("layer_type"), "subject")
+        if layer_type == "decor" and str(raw_layer.get("layer_id")) == "text-safe-zone":
+            placement = raw_layer.get("placement") if isinstance(raw_layer.get("placement"), dict) else {}
+            text_safe_zone = {
+                "x": _clamp_ratio(placement.get("x"), text_safe_zone["x"]),
+                "y": _clamp_ratio(placement.get("y"), text_safe_zone["y"]),
+                "w": _clamp_ratio(placement.get("w"), text_safe_zone["w"]),
+                "h": _clamp_ratio(placement.get("h"), text_safe_zone["h"]),
+            }
+            continue
+        index = decor_index if layer_type == "decor" else subject_index
+        fallback_bbox = _default_scene_bbox(layer_type, index)
+        if layer_type == "decor":
+            decor_index += 1
+        elif layer_type == "subject":
+            subject_index += 1
+        placement = raw_layer.get("placement") if isinstance(raw_layer.get("placement"), dict) else {}
+        if layer_type != "background":
+            center_x = _clamp_ratio(placement.get("x"), fallback_bbox["x"] + fallback_bbox["w"] / 2)
+            center_y = _clamp_ratio(placement.get("y"), fallback_bbox["y"] + fallback_bbox["h"] / 2)
+            fallback_bbox = {
+                "x": max(0.0, min(1.0 - fallback_bbox["w"], center_x - fallback_bbox["w"] / 2)),
+                "y": max(0.0, min(1.0 - fallback_bbox["h"], center_y - fallback_bbox["h"] / 2)),
+                "w": fallback_bbox["w"],
+                "h": fallback_bbox["h"],
+            }
+        objects.append(
+            {
+                "id": _safe_text(raw_layer.get("layer_id"), f"object-{len(objects) + 1}"),
+                "label": _safe_text(raw_layer.get("layer_name"), f"图层 {len(objects) + 1}"),
+                "layer_type": layer_type,
+                "bbox": fallback_bbox,
+                "depth_order": int(raw_layer.get("order") or len(objects)),
+                "prompt": _safe_text(raw_layer.get("prompt")),
+                "needs_transparent_bg": bool((raw_layer.get("generation_params") or {}).get("needs_transparent_bg")),
+            }
+        )
+    return {
+        "summary": _safe_text((draft.get("brief") or {}).get("summary"), (draft.get("brief") or {}).get("prompt")),
+        "text_safe_zone": text_safe_zone,
+        "objects": objects,
+    }
+
+
+def _normalize_scene_graph(value: dict, fallback: dict) -> dict:
+    fallback_objects = fallback.get("objects") or []
+    by_id = {
+        _safe_text(obj.get("id")): obj
+        for obj in fallback_objects
+        if isinstance(obj, dict) and _safe_text(obj.get("id"))
+    }
+    raw_objects = value.get("objects") if isinstance(value, dict) else []
+    normalized_objects = []
+    if isinstance(raw_objects, list):
+        for index, raw in enumerate(raw_objects):
+            if not isinstance(raw, dict):
+                continue
+            object_id = _safe_text(raw.get("id"), f"object-{index + 1}")
+            fallback_obj = by_id.get(object_id, fallback_objects[index] if index < len(fallback_objects) else {})
+            layer_type = _safe_text(raw.get("layer_type"), _safe_text(fallback_obj.get("layer_type"), "subject"))
+            normalized_objects.append(
+                {
+                    "id": object_id,
+                    "label": _safe_text(raw.get("label"), _safe_text(fallback_obj.get("label"), f"图层 {index + 1}")),
+                    "layer_type": layer_type,
+                    "bbox": _normalize_scene_bbox(raw.get("bbox"), (fallback_obj or {}).get("bbox") or _default_scene_bbox(layer_type, index)),
+                    "depth_order": int(raw.get("depth_order") or (fallback_obj or {}).get("depth_order") or index),
+                    "prompt": _safe_text(raw.get("prompt"), _safe_text((fallback_obj or {}).get("prompt"))),
+                    "needs_transparent_bg": bool(
+                        raw.get("needs_transparent_bg")
+                        if raw.get("needs_transparent_bg") is not None
+                        else (fallback_obj or {}).get("needs_transparent_bg")
+                    ),
+                }
+            )
+    if not normalized_objects:
+        normalized_objects = fallback_objects
+    return {
+        "summary": _safe_text(
+            value.get("summary") if isinstance(value, dict) else "",
+            fallback.get("summary"),
+        ),
+        "text_safe_zone": _normalize_scene_bbox(
+            value.get("text_safe_zone") if isinstance(value, dict) else {},
+            fallback.get("text_safe_zone") or {"x": 0.08, "y": 0.1, "w": 0.36, "h": 0.28},
+        ),
+        "objects": normalized_objects,
+    }
+
+
+def _attach_scene_graph_to_draft(draft: dict, scene_graph: dict, reference_image_base64: Optional[str]) -> dict:
+    next_draft = json.loads(json.dumps(draft))
+    next_draft["reference"] = {
+        "provider": _resolve_model_provider(),
+        "image_base64": reference_image_base64 or "",
+        "scene_graph": scene_graph,
+    }
+    if isinstance(next_draft.get("materials"), dict):
+        objects = scene_graph.get("objects") or []
+        by_id = {
+            _safe_text(item.get("id")): item
+            for item in objects
+            if isinstance(item, dict)
+        }
+        slots = next_draft["materials"].get("slots") or []
+        for slot in slots:
+            if not isinstance(slot, dict):
+                continue
+            ref = by_id.get(_safe_text(slot.get("id")))
+            if ref and _safe_text(ref.get("prompt")):
+                slot["prompt"] = _safe_text(ref.get("prompt"))
+    return next_draft
+
+
+def _build_reference_prompt(prompt: str, draft: dict, scene_graph: dict) -> str:
+    summary = _safe_text((draft.get("brief") or {}).get("summary"), prompt)
+    object_labels = ", ".join(
+        _safe_text(item.get("label"))
+        for item in (scene_graph.get("objects") or [])
+        if isinstance(item, dict) and _safe_text(item.get("label"))
+    )
+    return (
+        f"{summary}。"
+        f"请先生成一张仅用于构图参考的完整样图，保留主体关系、景深和文字留白。"
+        f"{'关键对象：' + object_labels if object_labels else ''}"
+    )
+
+
+def _generate_scene_reference_image(prompt: str, aspect_ratio: str, draft: dict, scene_graph: dict) -> Optional[str]:
+    provider = _resolve_image_provider(None)
+    width, height = _aspect_size(aspect_ratio or "3:4", width=1024)
+    reference_prompt = _build_reference_prompt(prompt, draft, scene_graph)
+    if provider == "gemini":
+        return _call_gemini_image(reference_prompt, width=width, height=height, transparent_background=False)
+    if provider == "siliconflow":
+        return _call_siliconflow_image(reference_prompt, width, height, steps=24)
+    return _build_placeholder_image(reference_prompt, width=width, height=height)
+
+
+def _analyze_reference_image_with_gemini(prompt: str, draft: dict, scene_graph: dict, image_b64: str) -> dict:
+    parts = [
+        {
+            "text": (
+                "Analyze this scene reference image and return JSON only. "
+                "Keep the same ids whenever possible. "
+                "Schema: {summary:string, text_safe_zone:{x:number,y:number,w:number,h:number}, "
+                "objects:[{id:string,label:string,layer_type:string,bbox:{x:number,y:number,w:number,h:number},"
+                "depth_order:number,prompt:string,needs_transparent_bg:boolean}]}. "
+                f"User brief: {prompt}. "
+                f"Existing object ids: {', '.join(_safe_text(item.get('id')) for item in scene_graph.get('objects') or [] if isinstance(item, dict))}."
+            )
+        },
+        _gemini_inline_image_part(image_b64),
+    ]
+    parsed = _call_gemini_generate_content(
+        parts=parts,
+        model=_resolve_llm_config().get("model"),
+        response_mime_type="application/json",
+        system_instruction=(
+            "You are a scene-layout planner. Return compact valid JSON only. "
+            "All bbox values must be normalized to 0..1 and represent top-left origin."
+        ),
+    )
+    text = _extract_gemini_text(parsed)
+    return _safe_parse_json_object(text)
+
+
+def _build_scene_reference_bundle(prompt: str, draft: dict, layer_plan_payload: dict) -> Tuple[Optional[str], dict]:
+    fallback_graph = _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    aspect_ratio = _safe_text((draft.get("brief") or {}).get("aspect_ratio"), "3:4")
+    try:
+        image_b64 = _generate_scene_reference_image(
+            prompt,
+            aspect_ratio,
+            draft,
+            fallback_graph,
+        )
+    except Exception:
+        width, height = _aspect_size(aspect_ratio, width=1024)
+        image_b64 = _build_placeholder_image(
+            _build_reference_prompt(prompt, draft, fallback_graph),
+            width=width,
+            height=height,
+        )
+    if not image_b64:
+        width, height = _aspect_size(aspect_ratio, width=1024)
+        image_b64 = _build_placeholder_image(
+            _build_reference_prompt(prompt, draft, fallback_graph),
+            width=width,
+            height=height,
+        )
+    provider = _resolve_model_provider()
+    if provider != "gemini":
+        return image_b64, fallback_graph
+    try:
+        analyzed = _analyze_reference_image_with_gemini(prompt, draft, fallback_graph, image_b64)
+        return image_b64, _normalize_scene_graph(analyzed, fallback_graph)
+    except Exception:
+        return image_b64, fallback_graph
+
+
 def build_scene_plan_payload(req: LayoutRequest) -> dict:
     layout_payload = generate_llm_layout(req)
     layer_plan_payload = analyze_layer_plan(
@@ -2129,11 +2592,15 @@ def build_scene_plan_payload(req: LayoutRequest) -> dict:
         "controls": _extract_scene_controls_from_layout(layout_config, req.prompt),
         "materials": _extract_scene_materials_from_layout(layout_config),
     }
+    reference_image_base64, scene_graph = _build_scene_reference_bundle(req.prompt, draft, layer_plan_payload)
+    draft = _attach_scene_graph_to_draft(draft, scene_graph, reference_image_base64)
     return {
         "text_response": layout_payload.get("text_response") or "",
         "layout_config": layout_config,
         "layer_plan": layer_plan_payload,
         "draft": draft,
+        "reference_image_base64": reference_image_base64,
+        "scene_graph": scene_graph,
     }
 
 import uuid
@@ -2920,6 +3387,42 @@ def scene_plan(req: LayoutRequest):
     return build_scene_plan_payload(req)
 
 
+@app.post("/scene/reference-image")
+def scene_reference_image(payload: dict):
+    prompt = _safe_text(payload.get("prompt"))
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {
+        "brief": {"prompt": prompt, "summary": prompt, "aspect_ratio": _safe_text(payload.get("aspect_ratio"), "3:4")}
+    }
+    layer_plan_payload = payload.get("layer_plan") if isinstance(payload.get("layer_plan"), dict) else {
+        "layer_plan": payload.get("scene_graph", {}).get("objects", [])
+    }
+    image_b64, scene_graph = _build_scene_reference_bundle(prompt, draft, layer_plan_payload)
+    return {
+        "reference_image_base64": image_b64,
+        "scene_graph": scene_graph,
+        "provider": _resolve_model_provider(),
+    }
+
+
+@app.post("/scene/reference-analysis")
+def scene_reference_analysis(payload: dict):
+    prompt = _safe_text(payload.get("prompt"))
+    image_b64 = _safe_text(payload.get("reference_image_base64"))
+    if not prompt or not image_b64:
+        return JSONResponse(status_code=400, content={"error": "缺少 prompt 或 reference_image_base64"})
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {
+        "brief": {"prompt": prompt, "summary": prompt, "aspect_ratio": "3:4"}
+    }
+    layer_plan_payload = payload.get("layer_plan") if isinstance(payload.get("layer_plan"), dict) else {}
+    fallback_graph = _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    if _resolve_model_provider() != "gemini":
+        return {"scene_graph": fallback_graph, "provider": _resolve_model_provider()}
+    analyzed = _analyze_reference_image_with_gemini(prompt, draft, fallback_graph, image_b64)
+    return {"scene_graph": _normalize_scene_graph(analyzed, fallback_graph), "provider": "gemini"}
+
+
 @app.post("/remove-background")
 def remove_background(payload: dict):
     """Heuristic background removal suitable for MVP usage."""
@@ -2932,6 +3435,68 @@ def remove_background(payload: dict):
         return {"image_base64": _encode_image_base64(output)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"抠图失败: {e}"})
+
+
+def _resolve_reference_object(req: ImageRequest) -> dict:
+    scene_graph = req.scene_graph if isinstance(req.scene_graph, dict) else {}
+    objects = scene_graph.get("objects") if isinstance(scene_graph, dict) else []
+    if isinstance(req.reference_bbox, dict):
+        return {
+            "bbox": req.reference_bbox,
+            "label": _safe_text(req.reference_prompt, _safe_text(req.layer_type, "素材")),
+            "layer_type": _safe_text(req.layer_type, "subject"),
+        }
+    if not isinstance(objects, list):
+        return {}
+    target_prompt = _safe_text(req.reference_prompt or req.prompt)
+    target_type = _safe_text(req.layer_type).lower()
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        if target_type and _safe_text(obj.get("layer_type")).lower() == target_type:
+            if target_prompt and target_prompt in _safe_text(obj.get("prompt")):
+                return obj
+            if target_prompt and target_prompt in _safe_text(obj.get("label")):
+                return obj
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        if target_type and _safe_text(obj.get("layer_type")).lower() == target_type:
+            return obj
+    return {}
+
+
+def _crop_reference_image(image_b64: str, bbox: dict) -> Optional[str]:
+    if not image_b64 or not isinstance(bbox, dict):
+        return None
+    image = _decode_base64_image(image_b64)
+    width, height = image.size
+    x = int(width * _clamp_ratio(bbox.get("x"), 0.0))
+    y = int(height * _clamp_ratio(bbox.get("y"), 0.0))
+    w = max(1, int(width * _clamp_ratio(bbox.get("w"), 1.0)))
+    h = max(1, int(height * _clamp_ratio(bbox.get("h"), 1.0)))
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
+    crop = image.crop((x, y, min(width, x + w), min(height, y + h)))
+    return _encode_image_base64(crop)
+
+
+def _build_reference_conditioned_prompt(req: ImageRequest, reference_object: dict) -> str:
+    prompt = _safe_text(req.prompt)
+    layer_type = _safe_text(req.layer_type, "subject")
+    if layer_type == "background":
+        return f"{prompt}。保持参考构图与景深，生成完整背景，不要出现文字。"
+    bbox = reference_object.get("bbox") if isinstance(reference_object, dict) else {}
+    bbox_desc = ""
+    if isinstance(bbox, dict):
+        bbox_desc = (
+            f"位置约为 x={_clamp_ratio(bbox.get('x'), 0.0):.2f}, "
+            f"y={_clamp_ratio(bbox.get('y'), 0.0):.2f}, "
+            f"w={_clamp_ratio(bbox.get('w'), 0.3):.2f}, "
+            f"h={_clamp_ratio(bbox.get('h'), 0.3):.2f}。"
+        )
+    transparent_instruction = "输出透明背景 PNG，仅保留这个对象。" if req.transparent_background else "保持参考对象样式。"
+    return f"{prompt}。请参考样图中的对应对象，{bbox_desc}{transparent_instruction}"
 
 
 @app.post("/generate-image")
@@ -2953,8 +3518,32 @@ def generate_image(req: ImageRequest):
         if not requested_transparency and (req.layer_type or "").strip().lower() not in {"", "background"}:
             requested_transparency = True
         provider = _resolve_image_provider(req.image_provider)
+        reference_object = _resolve_reference_object(req)
+        reference_crop_b64 = None
+        if req.reference_image_base64:
+            reference_crop_b64 = _crop_reference_image(
+                req.reference_image_base64,
+                reference_object.get("bbox") if isinstance(reference_object, dict) else {},
+            ) or req.reference_image_base64
+        conditioned_prompt = _build_reference_conditioned_prompt(req, reference_object)
+        if provider == "gemini":
+            image_b64 = _call_gemini_image(
+                conditioned_prompt,
+                width=width,
+                height=height,
+                reference_image_b64=reference_crop_b64,
+                transparent_background=requested_transparency,
+            )
+            if requested_transparency:
+                processed = _prepare_output_image(_decode_base64_image(image_b64), transparent_background=True)
+                image_b64 = _encode_image_base64(processed)
+            return {
+                "image_base64": image_b64,
+                "transparent_background": requested_transparency,
+                "fallback_used": False,
+            }
         if provider == "siliconflow":
-            image_b64 = _call_siliconflow_image(req.prompt, width, height, steps)
+            image_b64 = _call_siliconflow_image(conditioned_prompt, width, height, steps)
             if requested_transparency:
                 processed = _prepare_output_image(_decode_base64_image(image_b64), transparent_background=True)
                 image_b64 = _encode_image_base64(processed)
@@ -2993,7 +3582,7 @@ def generate_image(req: ImageRequest):
 
         with torch.inference_mode():
             image = pipe(
-                prompt=req.prompt,
+                prompt=conditioned_prompt,
                 negative_prompt=req.negative_prompt,
                 num_inference_steps=steps,
                 guidance_scale=req.guidance_scale or 7.5,
@@ -3079,9 +3668,16 @@ def compose_materials(payload: dict):
     materials = payload.get("materials") or []
     text_layers = _parse_text_layers(payload.get("text_layers"))
     text_panel_fill = _safe_text(payload.get("text_panel_fill"), "rgba(255,255,255,0.78)")
+    scene_graph = payload.get("scene_graph") if isinstance(payload.get("scene_graph"), dict) else {}
     aspect_ratio = payload.get("aspect_ratio") or "3:4"
     bg_w, bg_h = _aspect_size(aspect_ratio, width=1536)
     template = _aspect_layout_template(aspect_ratio)
+    scene_objects = scene_graph.get("objects") if isinstance(scene_graph, dict) else []
+    scene_by_id = {
+        _safe_text(item.get("id")): item
+        for item in scene_objects or []
+        if isinstance(item, dict) and _safe_text(item.get("id"))
+    }
 
     typed_materials = []
     for idx, mat in enumerate(materials):
@@ -3104,9 +3700,19 @@ def compose_materials(payload: dict):
 
     if subjects:
         hero = subjects[0]
-        center_x, center_y, size_ratio = template["hero"]
-        max_box = int(min(bg_w, bg_h) * size_ratio)
-        hero_w, hero_h = _fit_box_by_image(hero["image_base64"], max_box, max_box)
+        hero_obj = scene_by_id.get(hero["id"]) or {}
+        hero_bbox = hero_obj.get("bbox") if isinstance(hero_obj, dict) else {}
+        if isinstance(hero_bbox, dict) and hero_bbox:
+            hero_w = max(128, int(bg_w * _clamp_ratio(hero_bbox.get("w"), 0.28)))
+            hero_h = max(128, int(bg_h * _clamp_ratio(hero_bbox.get("h"), 0.44)))
+            hero_x = int(bg_w * _clamp_ratio(hero_bbox.get("x"), 0.36))
+            hero_y = int(bg_h * _clamp_ratio(hero_bbox.get("y"), 0.28))
+        else:
+            center_x, center_y, size_ratio = template["hero"]
+            max_box = int(min(bg_w, bg_h) * size_ratio)
+            hero_w, hero_h = _fit_box_by_image(hero["image_base64"], max_box, max_box)
+            hero_x = int(bg_w * center_x - hero_w / 2)
+            hero_y = int(bg_h * center_y - hero_h / 2)
         layout_layers.append(
             {
                 "id": hero["id"],
@@ -3117,8 +3723,8 @@ def compose_materials(payload: dict):
                 "width": hero_w,
                 "height": hero_h,
                 "placement": {
-                    "x": int(bg_w * center_x - hero_w / 2),
-                    "y": int(bg_h * center_y - hero_h / 2),
+                    "x": hero_x,
+                    "y": hero_y,
                     "z_index": z_index,
                 },
             }
@@ -3126,9 +3732,19 @@ def compose_materials(payload: dict):
         z_index += 1
 
     for idx, item in enumerate(subjects[1:]):
-        anchor_x, anchor_y, size_ratio = template["secondary"][idx % len(template["secondary"])]
-        max_box = int(min(bg_w, bg_h) * size_ratio)
-        item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box)
+        obj = scene_by_id.get(item["id"]) or {}
+        bbox = obj.get("bbox") if isinstance(obj, dict) else {}
+        if isinstance(bbox, dict) and bbox:
+            item_w = max(64, int(bg_w * _clamp_ratio(bbox.get("w"), 0.22)))
+            item_h = max(64, int(bg_h * _clamp_ratio(bbox.get("h"), 0.34)))
+            pos_x = int(bg_w * _clamp_ratio(bbox.get("x"), 0.12))
+            pos_y = int(bg_h * _clamp_ratio(bbox.get("y"), 0.44))
+        else:
+            anchor_x, anchor_y, size_ratio = template["secondary"][idx % len(template["secondary"])]
+            max_box = int(min(bg_w, bg_h) * size_ratio)
+            item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box)
+            pos_x = int(bg_w * anchor_x - item_w / 2)
+            pos_y = int(bg_h * anchor_y - item_h / 2)
         layout_layers.append(
             {
                 "id": item["id"],
@@ -3139,8 +3755,8 @@ def compose_materials(payload: dict):
                 "width": item_w,
                 "height": item_h,
                 "placement": {
-                    "x": int(bg_w * anchor_x - item_w / 2),
-                    "y": int(bg_h * anchor_y - item_h / 2),
+                    "x": pos_x,
+                    "y": pos_y,
                     "z_index": z_index,
                 },
             }
@@ -3148,9 +3764,19 @@ def compose_materials(payload: dict):
         z_index += 1
 
     for idx, item in enumerate(decors):
-        anchor_x, anchor_y, size_ratio = template["decor"][idx % len(template["decor"])]
-        max_box = int(min(bg_w, bg_h) * size_ratio)
-        item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box, fallback=max_box)
+        obj = scene_by_id.get(item["id"]) or {}
+        bbox = obj.get("bbox") if isinstance(obj, dict) else {}
+        if isinstance(bbox, dict) and bbox:
+            item_w = max(48, int(bg_w * _clamp_ratio(bbox.get("w"), 0.18)))
+            item_h = max(48, int(bg_h * _clamp_ratio(bbox.get("h"), 0.18)))
+            pos_x = int(bg_w * _clamp_ratio(bbox.get("x"), 0.08))
+            pos_y = int(bg_h * _clamp_ratio(bbox.get("y"), 0.08))
+        else:
+            anchor_x, anchor_y, size_ratio = template["decor"][idx % len(template["decor"])]
+            max_box = int(min(bg_w, bg_h) * size_ratio)
+            item_w, item_h = _fit_box_by_image(item["image_base64"], max_box, max_box, fallback=max_box)
+            pos_x = int(bg_w * anchor_x - item_w / 2)
+            pos_y = int(bg_h * anchor_y - item_h / 2)
         layout_layers.append(
             {
                 "id": item["id"],
@@ -3161,8 +3787,8 @@ def compose_materials(payload: dict):
                 "width": item_w,
                 "height": item_h,
                 "placement": {
-                    "x": int(bg_w * anchor_x - item_w / 2),
-                    "y": int(bg_h * anchor_y - item_h / 2),
+                    "x": pos_x,
+                    "y": pos_y,
                     "z_index": z_index,
                 },
             }
@@ -3170,7 +3796,14 @@ def compose_materials(payload: dict):
         z_index += 1
 
     if text_layers:
-        box_x_ratio, box_y_ratio, box_w_ratio, box_h_ratio = template["text_box"]
+        safe_zone = scene_graph.get("text_safe_zone") if isinstance(scene_graph, dict) else {}
+        if isinstance(safe_zone, dict) and safe_zone:
+            box_x_ratio = _clamp_ratio(safe_zone.get("x"), template["text_box"][0])
+            box_y_ratio = _clamp_ratio(safe_zone.get("y"), template["text_box"][1])
+            box_w_ratio = _clamp_ratio(safe_zone.get("w"), template["text_box"][2])
+            box_h_ratio = _clamp_ratio(safe_zone.get("h"), template["text_box"][3])
+        else:
+            box_x_ratio, box_y_ratio, box_w_ratio, box_h_ratio = template["text_box"]
         panel_x = int(bg_w * box_x_ratio)
         panel_y = int(bg_h * box_y_ratio)
         panel_w = int(bg_w * box_w_ratio)
@@ -3242,6 +3875,7 @@ def scene_preview(req: ScenePreviewRequest):
             "materials": req.materials or [],
             "text_layers": req.text_layers or [],
             "text_panel_fill": req.text_panel_fill,
+            "scene_graph": req.scene_graph or {},
         }
     )
 

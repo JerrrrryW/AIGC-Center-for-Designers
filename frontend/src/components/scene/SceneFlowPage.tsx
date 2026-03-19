@@ -59,6 +59,8 @@ type LayoutPayload = {
   layoutConfig?: any;
   layer_plan?: any;
   layerPlan?: any;
+  reference_image_base64?: string;
+  scene_graph?: any;
   draft?: Partial<SceneDraft> & {
     controls?: Partial<SceneDraft['controls']> & {
       positivePrompt?: string;
@@ -355,6 +357,7 @@ const SceneFlowPage: React.FC = () => {
           materials,
           text_layers: textLayers,
           text_panel_fill: 'rgba(255,255,255,0.78)',
+          scene_graph: sceneDraft?.reference?.scene_graph ?? {},
         });
 
         const nextComposition: PreviewComposition = {
@@ -385,7 +388,7 @@ const SceneFlowPage: React.FC = () => {
         }
       }
     },
-    [aspectRatio, buildPendingItemsFromComposition, effectiveLayoutConfig, mediaSlots, textLayers],
+    [aspectRatio, buildPendingItemsFromComposition, effectiveLayoutConfig, mediaSlots, sceneDraft?.reference?.scene_graph, textLayers],
   );
 
   useEffect(() => {
@@ -671,6 +674,9 @@ const SceneFlowPage: React.FC = () => {
           height: size.height,
           layer_type: slot.layerType,
           transparent_background: !isBackground,
+          reference_image_base64: sceneDraft?.reference?.image_base64 || null,
+          scene_graph: sceneDraft?.reference?.scene_graph || null,
+          reference_prompt: slot.label,
         });
         const base64 = imgRes.data?.image_base64;
         if (!base64) throw new Error('未返回图片数据');
@@ -692,7 +698,7 @@ const SceneFlowPage: React.FC = () => {
         setIsWorking(false);
       }
     },
-    [aspectRatio, updateSlot],
+    [aspectRatio, sceneDraft, updateSlot],
   );
 
   const handleGenerateAllSlots = useCallback(async () => {
@@ -741,6 +747,9 @@ const SceneFlowPage: React.FC = () => {
           height: size.height,
           layer_type: slot.layerType,
           transparent_background: !isBackground,
+          reference_image_base64: sceneDraft?.reference?.image_base64 || null,
+          scene_graph: sceneDraft?.reference?.scene_graph || null,
+          reference_prompt: slot.label,
         });
         const base64 = imgRes.data?.image_base64;
         if (!base64) {
@@ -770,7 +779,7 @@ const SceneFlowPage: React.FC = () => {
     } finally {
       setIsWorking(false);
     }
-  }, [aspectRatio, effectiveLayoutConfig, mediaSlots, uiState, updateSlot]);
+  }, [aspectRatio, effectiveLayoutConfig, mediaSlots, sceneDraft, uiState, updateSlot]);
 
   const handleSlotRemoveBackground = useCallback(
     async (componentId: string, slot: MediaSlot) => {
@@ -2079,6 +2088,35 @@ function normalizeSceneDraft(
       subjects,
       decors,
       slots: normalizedSlots,
+    },
+    reference: {
+      provider: safeText(value?.reference?.provider, 'gemini'),
+      image_base64: safeText(value?.reference?.image_base64),
+      scene_graph: {
+        summary: safeText(value?.reference?.scene_graph?.summary, safeText(value?.brief?.summary, prompt)),
+        text_safe_zone: {
+          x: safeNumber(value?.reference?.scene_graph?.text_safe_zone?.x, 0.08),
+          y: safeNumber(value?.reference?.scene_graph?.text_safe_zone?.y, 0.1),
+          w: safeNumber(value?.reference?.scene_graph?.text_safe_zone?.w, 0.36),
+          h: safeNumber(value?.reference?.scene_graph?.text_safe_zone?.h, 0.28),
+        },
+        objects: Array.isArray(value?.reference?.scene_graph?.objects)
+          ? value!.reference!.scene_graph!.objects.map((item: any, index: number) => ({
+              id: safeText(item?.id, `reference-object-${index + 1}`),
+              label: safeText(item?.label, `图层 ${index + 1}`),
+              layer_type: normalizeLayerType(item?.layer_type),
+              bbox: {
+                x: safeNumber(item?.bbox?.x, 0.1),
+                y: safeNumber(item?.bbox?.y, 0.1),
+                w: safeNumber(item?.bbox?.w, 0.3),
+                h: safeNumber(item?.bbox?.h, 0.3),
+              },
+              depth_order: safeNumber(item?.depth_order, index),
+              prompt: safeText(item?.prompt),
+              needs_transparent_bg: Boolean(item?.needs_transparent_bg),
+            }))
+          : [],
+      },
     },
   };
 }

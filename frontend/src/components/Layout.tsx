@@ -14,6 +14,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  MenuItem,
   Stack,
   TextField,
   Toolbar,
@@ -34,12 +35,11 @@ const drawerWidth = 240;
 const LLM_CONFIG_STORAGE_KEY = 'llm-config';
 
 type LlmConfigState = {
+  provider: 'gemini' | 'siliconflow';
   apiKey: string;
   baseUrl: string;
   model: string;
   temperature: string;
-  imageApiKey: string;
-  imageBaseUrl: string;
   imageModel: string;
 };
 
@@ -51,12 +51,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [llmOpen, setLlmOpen] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigState>({
+    provider: 'gemini',
     apiKey: '',
     baseUrl: '',
     model: '',
     temperature: '',
-    imageApiKey: '',
-    imageBaseUrl: '',
     imageModel: '',
   });
   const [llmStatus, setLlmStatus] = useState<string | null>(null);
@@ -91,12 +90,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     const temperatureRaw = llmConfig.temperature.trim();
     const temperature = temperatureRaw ? Number(temperatureRaw) : null;
     return {
+      provider: llmConfig.provider,
       api_key: llmConfig.apiKey.trim() || null,
       base_url: llmConfig.baseUrl.trim() || null,
       model: llmConfig.model.trim() || null,
       temperature: Number.isFinite(temperature) ? temperature : null,
-      image_api_key: llmConfig.imageApiKey.trim() || null,
-      image_base_url: llmConfig.imageBaseUrl.trim() || null,
       image_model: llmConfig.imageModel.trim() || null,
     };
   }, [llmConfig]);
@@ -158,6 +156,27 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <Collapse in={llmOpen} timeout="auto" unmountOnExit>
           <Stack spacing={1.5} sx={{ mt: 1 }}>
             <TextField
+              select
+              label="Provider"
+              size="small"
+              value={llmConfig.provider}
+              onChange={(e) =>
+                setLlmConfig((prev) => ({ ...prev, provider: e.target.value as LlmConfigState['provider'] }))
+              }
+              fullWidth
+            >
+              <MenuItem value="gemini">Gemini</MenuItem>
+              <MenuItem value="siliconflow">SiliconFlow</MenuItem>
+            </TextField>
+            <Typography variant="caption" color="text.secondary">
+              全局仅使用一个模型服务商。当前默认走 {llmConfig.provider === 'gemini' ? 'Gemini' : 'SiliconFlow'}。
+            </Typography>
+            {llmConfig.provider === 'siliconflow' ? (
+              <Typography variant="caption" color="text.secondary">
+                SiliconFlow 模式下，图层分割与抠图将回退到本地算法。
+              </Typography>
+            ) : null}
+            <TextField
               label="API Key"
               type="password"
               size="small"
@@ -168,7 +187,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <TextField
               label="Base URL"
               size="small"
-              placeholder="https://api.siliconflow.cn/v1/chat/completions"
+              placeholder={
+                llmConfig.provider === 'gemini'
+                  ? 'https://generativelanguage.googleapis.com/v1beta'
+                  : 'https://api.siliconflow.cn/v1/chat/completions'
+              }
               value={llmConfig.baseUrl}
               onChange={(e) => setLlmConfig((prev) => ({ ...prev, baseUrl: e.target.value }))}
               fullWidth
@@ -176,7 +199,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <TextField
               label="Model"
               size="small"
-              placeholder="Qwen/Qwen3-Next-80B-A3B-Instruct"
+              placeholder={
+                llmConfig.provider === 'gemini'
+                  ? 'gemini-2.5-flash'
+                  : 'Qwen/Qwen3-Next-80B-A3B-Instruct'
+              }
               value={llmConfig.model}
               onChange={(e) => setLlmConfig((prev) => ({ ...prev, model: e.target.value }))}
               fullWidth
@@ -191,28 +218,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             />
             <Divider />
             <Typography variant="caption" color="text.secondary">
-              生图配置（可选，默认复用 LLM Key）
+              生图模型（默认与上方 provider 保持一致）
             </Typography>
-            <TextField
-              label="Image API Key"
-              type="password"
-              size="small"
-              value={llmConfig.imageApiKey}
-              onChange={(e) => setLlmConfig((prev) => ({ ...prev, imageApiKey: e.target.value }))}
-              fullWidth
-            />
-            <TextField
-              label="Image Base URL"
-              size="small"
-              placeholder="https://api.siliconflow.cn/v1"
-              value={llmConfig.imageBaseUrl}
-              onChange={(e) => setLlmConfig((prev) => ({ ...prev, imageBaseUrl: e.target.value }))}
-              fullWidth
-            />
             <TextField
               label="Image Model"
               size="small"
-              placeholder="Qwen/Qwen-Image"
+              placeholder={
+                llmConfig.provider === 'gemini'
+                  ? 'gemini-3.1-flash-image-preview'
+                  : 'Qwen/Qwen-Image'
+              }
               value={llmConfig.imageModel}
               onChange={(e) => setLlmConfig((prev) => ({ ...prev, imageModel: e.target.value }))}
               fullWidth

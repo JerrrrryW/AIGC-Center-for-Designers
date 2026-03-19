@@ -404,7 +404,32 @@ const SceneSetupCard: React.FC<SceneSetupCardProps> = ({
           {sceneDraft?.materials?.slots?.length ? <Chip label={`${sceneDraft.materials.slots.length} 个图层`} size="small" /> : null}
           <Chip label={`文案字段 ${copyReadyCount}/3`} size="small" />
           {layerPlan?.estimated_time_seconds ? <Chip label={`约 ${layerPlan.estimated_time_seconds}s`} size="small" variant="outlined" /> : null}
+          {sceneDraft?.reference?.image_base64 ? (
+            <Chip label={`参考构图 · ${sceneDraft.reference.provider}`} size="small" color="info" variant="outlined" />
+          ) : null}
         </Stack>
+
+        {sceneDraft?.reference?.image_base64 ? (
+          <Box
+            sx={{
+              width: 156,
+              borderRadius: 2,
+              overflow: 'hidden',
+              border: '1px solid rgba(15, 23, 42, 0.08)',
+              backgroundColor: 'rgba(248,250,252,0.88)',
+            }}
+          >
+            <img
+              src={
+                sceneDraft.reference.image_base64.startsWith('data:')
+                  ? sceneDraft.reference.image_base64
+                  : `data:image/png;base64,${sceneDraft.reference.image_base64}`
+              }
+              alt="参考构图"
+              style={{ display: 'block', width: '100%', height: 'auto' }}
+            />
+          </Box>
+        ) : null}
 
         {componentId ? (
           <HorizontalMaterialsStrip

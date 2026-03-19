@@ -5,6 +5,36 @@ export type SceneMaterialDraftSlot = {
   prompt: string;
 };
 
+export type SceneGraphObject = {
+  id: string;
+  label: string;
+  layer_type: 'background' | 'subject' | 'decor' | string;
+  bbox: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  };
+  depth_order: number;
+  prompt: string;
+  needs_transparent_bg: boolean;
+};
+
+export type SceneReferenceDraft = {
+  provider: 'gemini' | 'siliconflow' | string;
+  image_base64: string;
+  scene_graph: {
+    summary: string;
+    text_safe_zone: {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    };
+    objects: SceneGraphObject[];
+  };
+};
+
 export type SceneDraft = {
   brief: {
     prompt: string;
@@ -30,4 +60,5 @@ export type SceneDraft = {
     decors: SceneMaterialDraftSlot[];
     slots: SceneMaterialDraftSlot[];
   };
+  reference: SceneReferenceDraft;
 };
