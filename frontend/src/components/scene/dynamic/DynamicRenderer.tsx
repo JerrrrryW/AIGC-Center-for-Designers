@@ -415,6 +415,23 @@ const normalizeOptions = (options: OptionItem[] | undefined): NormalizedOption[]
     .filter(Boolean) as NormalizedOption[];
 };
 
+const textFieldChromeSx = {
+  '& .MuiInputLabel-root': {
+    backgroundColor: '#fff',
+    px: 0.5,
+  },
+  '& .MuiOutlinedInput-root': {
+    pt: 1,
+    alignItems: 'flex-start',
+  },
+  '& .MuiInputBase-input': {
+    pt: 1,
+  },
+  '& .MuiInputBase-inputMultiline': {
+    pt: 0.25,
+  },
+};
+
 type OptionCardProps = {
   option: NormalizedOption;
   selected: boolean;
@@ -582,7 +599,7 @@ const OptionCard: React.FC<OptionCardProps> = ({
   );
 };
 
-const ComponentRenderer: React.FC<ComponentRendererProps> = ({
+export const ComponentRenderer: React.FC<ComponentRendererProps> = ({
   component,
   value,
   onChange,
@@ -626,6 +643,8 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
           placeholder={component.placeholder}
           fullWidth
           disabled={disabled}
+          InputLabelProps={{ shrink: true }}
+          sx={textFieldChromeSx}
         />
       );
     case 'textarea':
@@ -639,6 +658,8 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
           multiline
           minRows={3}
           disabled={disabled}
+          InputLabelProps={{ shrink: true }}
+          sx={textFieldChromeSx}
         />
       );
     case 'select': {
@@ -859,6 +880,8 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
           helperText={helperText}
           fullWidth
           disabled={disabled}
+          InputLabelProps={{ shrink: true }}
+          sx={textFieldChromeSx}
         />
       );
     }
@@ -1055,6 +1078,8 @@ const ComponentRenderer: React.FC<ComponentRendererProps> = ({
               minRows={2}
               disabled={disabled}
               helperText={field.helperText}
+              InputLabelProps={{ shrink: true }}
+              sx={textFieldChromeSx}
             />
           ))}
         </Stack>
@@ -1194,7 +1219,8 @@ const MediaUploaderField: React.FC<MediaUploaderFieldProps> = ({
                   multiline
                   minRows={2}
                   disabled={disabled}
-                  sx={{ mt: 1.5 }}
+                  sx={{ mt: 1.5, ...textFieldChromeSx }}
+                  InputLabelProps={{ shrink: true }}
                   helperText={
                     expectsTransparent
                       ? '主体/装饰层会优先按透明底生成，便于后续拼版。'

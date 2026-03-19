@@ -7,8 +7,10 @@ import {
   Card,
   CardContent,
   Chip,
+  Collapse,
   CircularProgress,
   Container,
+  Divider,
   IconButton,
   LinearProgress,
   Stack,
@@ -22,7 +24,10 @@ import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
-import { SectionCard, type LayoutSection, type MediaSlot } from '../dynamic/DynamicRenderer';
+import TuneIcon from '@mui/icons-material/Tune';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import { ComponentRenderer, type LayoutSection, type MediaSlot } from '../dynamic/DynamicRenderer';
 import { type SceneDraft } from './sceneDraft';
 
 type StatusState = {
@@ -109,6 +114,14 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
     () => configSections.filter((section) => !isCopySection(section)),
     [configSections],
   );
+  const coreSettingSections = useMemo(
+    () => settingSections.filter((section) => !isAdvancedSettingSection(section)),
+    [settingSections],
+  );
+  const advancedSettingSections = useMemo(
+    () => settingSections.filter((section) => isAdvancedSettingSection(section)),
+    [settingSections],
+  );
   const previewSyncLabel = isPreviewSyncing ? '实时同步中' : previewComposition ? '实时预览已同步' : '等待预览';
   const copyReadyCount = [sceneDraft?.copy?.headline, sceneDraft?.copy?.subtitle, sceneDraft?.copy?.body].filter(Boolean).length;
 
@@ -177,51 +190,68 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
             <>
               <SectionLabel
                 title="文案与内容"
-                description="直接进入预览与画布。"
+                description="文案集中编辑，减少来回查找。"
               />
-              {copySections.map((section) => (
-                <SectionCard
-                  key={section.id}
-                  section={section}
-                  cardType={section.cardType}
-                  state={uiState}
-                  onStateChange={onStateChange}
-                  onSlotUpload={onSlotUpload}
-                  onSlotGenerate={onSlotGenerate}
-                  onSlotRemoveBackground={onSlotRemoveBackground}
-                  disabled={isWorking}
-                />
-              ))}
+              <SectionGroupCard
+                title="文案编辑"
+                subtitle="标题、副标题、正文和主色调集中在一张卡里。"
+                sections={copySections}
+                state={uiState}
+                onStateChange={onStateChange}
+                onSlotUpload={onSlotUpload}
+                onSlotGenerate={onSlotGenerate}
+                onSlotRemoveBackground={onSlotRemoveBackground}
+                disabled={isWorking}
+                compact
+                defaultExpanded
+              />
             </>
           ) : null}
 
-          {settingSections.length ? (
+          {coreSettingSections.length || advancedSettingSections.length ? (
             <>
               <SectionLabel
                 title="参数配置"
-                description="影响素材生成和预览。"
+                description="常用项放前，高级项折叠收纳。"
               />
               <Box
                 sx={{
-                  display: 'grid',
-                  gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+                  display: 'flex',
+                  flexDirection: 'column',
                   gap: 2,
-                  alignItems: 'start',
                 }}
               >
-                {settingSections.map((section) => (
-                  <SectionCard
-                    key={section.id}
-                    section={section}
-                    cardType={section.cardType}
+                {coreSettingSections.length ? (
+                  <SectionGroupCard
+                    title="核心参数"
+                    subtitle="优先保留画幅、风格、氛围和构图。"
+                    sections={coreSettingSections}
                     state={uiState}
                     onStateChange={onStateChange}
                     onSlotUpload={onSlotUpload}
                     onSlotGenerate={onSlotGenerate}
                     onSlotRemoveBackground={onSlotRemoveBackground}
                     disabled={isWorking}
+                    compact
+                    defaultExpanded
                   />
-                ))}
+                ) : null}
+                {advancedSettingSections.length ? (
+                  <SectionGroupCard
+                    title="高级参数"
+                    subtitle="提示词和技术参数收进一张卡，默认折叠。"
+                    sections={advancedSettingSections}
+                    state={uiState}
+                    onStateChange={onStateChange}
+                    onSlotUpload={onSlotUpload}
+                    onSlotGenerate={onSlotGenerate}
+                    onSlotRemoveBackground={onSlotRemoveBackground}
+                    disabled={isWorking}
+                    compact
+                    defaultExpanded={false}
+                    accent="soft"
+                  />
+                ) : null}
               </Box>
             </>
           ) : null}
@@ -336,6 +366,141 @@ const SectionLabel: React.FC<{
     </Typography>
   </Box>
 );
+
+type SectionGroupCardProps = {
+  title: string;
+  subtitle?: string;
+  sections: LayoutSection[];
+  state: Record<string, any>;
+  onStateChange: (componentId: string, value: any) => void;
+  onSlotUpload: (componentId: string, slotId: string, file: File) => void;
+  onSlotGenerate: (componentId: string, slot: MediaSlot) => void;
+  onSlotRemoveBackground: (componentId: string, slot: MediaSlot) => void;
+  disabled?: boolean;
+  compact?: boolean;
+  defaultExpanded?: boolean;
+  accent?: 'default' | 'soft';
+};
+
+const SectionGroupCard: React.FC<SectionGroupCardProps> = ({
+  title,
+  subtitle,
+  sections,
+  state,
+  onStateChange,
+  onSlotUpload,
+  onSlotGenerate,
+  onSlotRemoveBackground,
+  disabled,
+  compact = false,
+  defaultExpanded = true,
+  accent = 'default',
+}) => {
+  const [expanded, setExpanded] = React.useState(defaultExpanded);
+  const sectionCount = sections.length;
+  const configuredCount = sections.reduce((count, section) => count + countDirtyComponents(section, state), 0);
+
+  return (
+    <Card
+      variant="outlined"
+      sx={{
+        borderRadius: 2.5,
+        boxShadow: accent === 'soft' ? '0 10px 26px rgba(15, 23, 42, 0.07)' : '0 14px 30px rgba(15, 23, 42, 0.09)',
+        borderColor: 'rgba(15, 23, 42, 0.10)',
+        background: accent === 'soft'
+          ? 'linear-gradient(180deg, rgba(250,251,253,1) 0%, rgba(255,255,255,1) 100%)'
+          : 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(248,250,252,1) 100%)',
+      }}
+    >
+      <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+        <Stack direction="row" spacing={1.5} alignItems="flex-start" justifyContent="space-between">
+          <Box sx={{ minWidth: 0 }}>
+            <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+              <Typography variant="h6">{title}</Typography>
+              <Chip label={`${sectionCount} 组`} size="small" variant="outlined" />
+              {configuredCount > 0 ? <Chip label={`已配置 ${configuredCount}`} size="small" color="primary" /> : null}
+            </Stack>
+            {subtitle ? (
+              <Typography variant="caption" color="text.secondary">
+                {subtitle}
+              </Typography>
+            ) : null}
+          </Box>
+          {!defaultExpanded ? (
+            <Button
+              size="small"
+              startIcon={<TuneIcon fontSize="small" />}
+              endIcon={expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+              onClick={() => setExpanded((prev) => !prev)}
+            >
+              {expanded ? '收起' : '展开'}
+            </Button>
+          ) : null}
+        </Stack>
+
+        <Collapse in={expanded} timeout="auto" unmountOnExit={false}>
+          <Stack spacing={compact ? 1.5 : 2}>
+            {sections.map((section, index) => (
+              <Box key={section.id}>
+                {index > 0 ? <Divider sx={{ mb: compact ? 1.5 : 2 }} /> : null}
+                <Stack spacing={compact ? 1.25 : 1.75}>
+                  {section.title ? (
+                    <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                      <Typography variant="subtitle2">{section.title}</Typography>
+                      {section.description ? (
+                        <Typography variant="caption" color="text.secondary">
+                          {section.description}
+                        </Typography>
+                      ) : null}
+                    </Stack>
+                  ) : section.description ? (
+                    <Typography variant="caption" color="text.secondary">
+                      {section.description}
+                    </Typography>
+                  ) : null}
+                  <Box sx={{ overflowX: 'auto', overflowY: 'visible', pb: 0.5 }}>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        gap: compact ? 1.5 : 2,
+                        minWidth: 0,
+                        width: '100%',
+                        alignItems: 'stretch',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      {(section.components ?? []).map((component) => (
+                        <Box
+                          key={component.id}
+                          sx={{
+                            minWidth: resolveComponentMinWidth(component),
+                            width: resolveComponentStretch(component),
+                            maxWidth: resolveComponentStretch(component) === '100%' ? 960 : 'none',
+                            flex: resolveComponentStretch(component) === '100%' ? '1 0 100%' : '1 1 320px',
+                          }}
+                        >
+                          <ComponentRenderer
+                            component={component as any}
+                            value={state[component.id]}
+                            onChange={(value) => onStateChange(component.id, value)}
+                            onSlotUpload={(slotId, file) => onSlotUpload(component.id, slotId, file)}
+                            onSlotGenerate={(slot) => onSlotGenerate(component.id, slot)}
+                            onSlotRemoveBackground={(slot) => onSlotRemoveBackground(component.id, slot)}
+                            disabled={disabled}
+                          />
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                </Stack>
+              </Box>
+            ))}
+          </Stack>
+        </Collapse>
+      </CardContent>
+    </Card>
+  );
+};
 
 type SceneSetupCardProps = {
   materialsSection?: LayoutSection;
@@ -811,6 +976,63 @@ function isCopySection(section: LayoutSection): boolean {
     const sample = `${component.id || ''} ${component.label || ''} ${component.title || ''}`.toLowerCase();
     return /标题|headline|subtitle|文案|copy|body/.test(sample);
   });
+}
+
+function isAdvancedSettingSection(section: LayoutSection): boolean {
+  const sample = `${section.id || ''} ${section.title || ''} ${section.cardType || ''}`.toLowerCase();
+  if (/prompt|advanced|control|seed|cfg|negative|steps/.test(sample)) return true;
+  return (section.components ?? []).some((component: any) => {
+    const componentSample = `${component.id || ''} ${component.label || ''} ${component.title || ''} ${component.type || ''}`.toLowerCase();
+    return /prompt|seed|cfg|negative|steps/.test(componentSample);
+  });
+}
+
+function resolveComponentStretch(component: any): string {
+  const type = String(component?.type || '').toLowerCase();
+  if (type === 'textarea' || type === 'prompt-editor' || type === 'media-uploader') {
+    return '100%';
+  }
+  const sample = `${component?.id || ''} ${component?.label || ''} ${component?.title || ''}`.toLowerCase();
+  if (/正文|body|copy|prompt|主色调|palette|画风|风格|氛围|构图/.test(sample)) {
+    return '100%';
+  }
+  return 'auto';
+}
+
+function resolveComponentMinWidth(component: any): number {
+  const type = String(component?.type || '').toLowerCase();
+  if (type === 'slider') return 280;
+  if (type === 'toggle') return 220;
+  if (type === 'color-palette' || type === 'ratio-select') return 320;
+  if (type === 'select' || type === 'multi-select') return 320;
+  if (type === 'textarea' || type === 'prompt-editor') return 540;
+  return 260;
+}
+
+function countDirtyComponents(section: LayoutSection, state: Record<string, any>): number {
+  return (section.components ?? []).reduce((count, component: any) => {
+    const value = state[component.id];
+    if (value === undefined || value === null) return count;
+    if (typeof value === 'string') {
+      return value.trim() ? count + 1 : count;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return count + 1;
+    }
+    if (Array.isArray(value)) {
+      return value.length ? count + 1 : count;
+    }
+    if (typeof value === 'object') {
+      return Object.values(value).some((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (Array.isArray(item)) return item.length > 0;
+        return Boolean(item);
+      })
+        ? count + 1
+        : count;
+    }
+    return count;
+  }, 0);
 }
 
 function formatLayerType(layerType: unknown): string {
