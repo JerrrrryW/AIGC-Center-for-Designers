@@ -59,6 +59,7 @@ type LayoutPayload = {
   layoutConfig?: any;
   layer_plan?: any;
   layerPlan?: any;
+  snapshot?: any;
   reference_image_base64?: string;
   scene_graph?: any;
   draft?: Partial<SceneDraft> & {
@@ -84,11 +85,58 @@ type TextLayerDraft = {
   align?: 'left' | 'center' | 'right';
 };
 
+type GenerationControls = {
+  positivePrompt: string;
+  negativePrompt: string;
+  steps: number;
+  guidanceScale: number;
+  seedLocked: boolean;
+};
+
 type PreviewComposition = {
   layers: any[];
   canvasWidth: number;
   canvasHeight: number;
   updatedAt: number;
+};
+
+type SceneSnapshotLayer = {
+  id: string;
+  label: string;
+  layerType: 'background' | 'subject' | 'decor';
+  bbox: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  };
+  width: number;
+  height: number;
+  zIndex: number;
+  cutoutImageBase64: string;
+  maskImageBase64?: string;
+  sourcePrompt: string;
+  editable: boolean;
+};
+
+type SceneSnapshot = {
+  revisionId: string;
+  referenceImageBase64: string;
+  cleanPlateImageBase64: string;
+  width: number;
+  height: number;
+  layers: SceneSnapshotLayer[];
+  warnings: string[];
+  segmentationFallbackUsed: boolean;
+  cleanPlateFallbackUsed: boolean;
+};
+
+type LayerPlacement = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  zIndex: number;
 };
 
 const CANVAS_DIMENSION = 4000;
@@ -122,8 +170,6 @@ const SceneFlowPage: React.FC = () => {
   const messagesRef = useRef<ChatMessage[]>([]);
   const answersRef = useRef<Record<string, AnswerState>>({});
   const questionListRef = useRef<QuestionItem[]>([]);
-  const previewRequestRef = useRef(0);
-
   const [layoutConfig, setLayoutConfig] = useState<LayoutConfig | undefined>(undefined);
   const [layerPlan, setLayerPlan] = useState<any>(null);
   const [sceneDraft, setSceneDraft] = useState<SceneDraft | undefined>(undefined);
@@ -132,6 +178,9 @@ const SceneFlowPage: React.FC = () => {
   const [uiState, setUiState] = useState<Record<string, any>>({});
   const [previewItems, setPreviewItems] = useState<any[]>([]);
   const [previewComposition, setPreviewComposition] = useState<PreviewComposition | null>(null);
+  const [sceneSnapshot, setSceneSnapshot] = useState<SceneSnapshot | null>(null);
+  const [layerPlacements, setLayerPlacements] = useState<Record<string, LayerPlacement>>({});
+  const [lastRegeneratedGlobalSignature, setLastRegeneratedGlobalSignature] = useState('');
   const [isPreviewSyncing, setIsPreviewSyncing] = useState(false);
   const [previewError, setPreviewError] = useState('');
 
@@ -212,6 +261,20 @@ const SceneFlowPage: React.FC = () => {
     () => collectTextLayers(effectiveLayoutConfig, uiState, selectedOptions),
     [effectiveLayoutConfig, selectedOptions, uiState],
   );
+  const generationControls = useMemo(
+    () => resolveGenerationControls(effectiveLayoutConfig, uiState, sceneDraft),
+    [effectiveLayoutConfig, sceneDraft, uiState],
+  );
+  const globalControlSignature = useMemo(
+    () => buildGlobalControlSignature(effectiveLayoutConfig, uiState),
+    [effectiveLayoutConfig, uiState],
+  );
+  const hasPendingGlobalChanges = Boolean(
+    sceneSnapshot &&
+      globalControlSignature &&
+      lastRegeneratedGlobalSignature &&
+      globalControlSignature !== lastRegeneratedGlobalSignature,
+  );
   const activeStep = previewComposition ? 2 : effectiveLayoutConfig ? 1 : 0;
 
   useEffect(() => {
@@ -288,20 +351,17 @@ const SceneFlowPage: React.FC = () => {
       });
 
       composition.layers.forEach((layer: any) => {
-        const placement = layer.placement || {};
         const mapped = mapToCanvas({
-          x: placement.x ?? 0,
-          y: placement.y ?? 0,
+          x: layer.x ?? 0,
+          y: layer.y ?? 0,
           width: layer.width ?? 512,
           height: layer.height ?? 512,
-          zIndex: placement.z_index ?? 1,
+          zIndex: layer.placement?.zIndex ?? 1,
           bgW,
           bgH,
         });
         if ((layer.kind || 'image') === 'image') {
-          const dataUrl = layer.image_base64?.startsWith('data:')
-            ? layer.image_base64
-            : `data:image/png;base64,${layer.image_base64}`;
+          const dataUrl = layer.dataUrl || toImageDataUrl(layer.image_base64) || '';
           pending.push({
             kind: 'image',
             dataUrl,
@@ -334,40 +394,22 @@ const SceneFlowPage: React.FC = () => {
   );
 
   const syncPreviewComposition = useCallback(
-    async (reason: 'auto' | 'manual' = 'auto') => {
+    async (reason: 'auto' | 'manual' = 'auto', options?: { throwOnError?: boolean }) => {
       if (!effectiveLayoutConfig) return null;
-      const requestId = previewRequestRef.current + 1;
-      previewRequestRef.current = requestId;
       setIsPreviewSyncing(true);
       setPreviewError('');
 
-      const materials = mediaSlots
-        .filter((slot) => slot.layerType !== 'background')
-        .map((slot) => ({
-          id: slot.id,
-          name: slot.label,
-          layer_type: slot.layerType,
-          image_base64: slot.uri ? extractBase64(slot.uri) : undefined,
-        }));
-
       try {
-        const backgroundSize = resolveSizeForSlot(true, aspectRatio);
-        const response = await api.post('/scene/preview', {
-          aspect_ratio: aspectRatio,
-          materials,
-          text_layers: textLayers,
-          text_panel_fill: 'rgba(255,255,255,0.78)',
-          scene_graph: sceneDraft?.reference?.scene_graph ?? {},
+        const nextComposition = buildLocalPreviewComposition({
+          snapshot: sceneSnapshot,
+          mediaSlots,
+          textLayers,
+          sceneGraph: sceneDraft?.reference?.scene_graph,
+          placements: layerPlacements,
+          aspectRatio,
+          layoutConfig: effectiveLayoutConfig,
+          uiState,
         });
-
-        const nextComposition: PreviewComposition = {
-          layers: Array.isArray(response.data?.layers) ? response.data.layers : [],
-          canvasWidth: Number(response.data?.canvas_width) || backgroundSize.width,
-          canvasHeight: Number(response.data?.canvas_height) || backgroundSize.height,
-          updatedAt: Date.now(),
-        };
-
-        if (previewRequestRef.current !== requestId) return null;
         setPreviewComposition(nextComposition);
         setPreviewItems(buildPendingItemsFromComposition(nextComposition));
         if (reason === 'manual') {
@@ -375,20 +417,30 @@ const SceneFlowPage: React.FC = () => {
         }
         return nextComposition;
       } catch (error) {
-        if (previewRequestRef.current === requestId) {
-          setPreviewError(toApiErrorMessage(error, '实时预览同步失败。'));
-          if (reason === 'manual') {
-            setStatus({ type: 'error', message: toApiErrorMessage(error, '生成预览失败。') });
-          }
+        const message = toApiErrorMessage(error, reason === 'manual' ? '生成预览失败。' : '实时预览同步失败。');
+        setPreviewError(message);
+        if (reason === 'manual') {
+          setStatus({ type: 'error', message });
+        }
+        if (options?.throwOnError) {
+          throw new Error(message);
         }
         return null;
       } finally {
-        if (previewRequestRef.current === requestId) {
-          setIsPreviewSyncing(false);
-        }
+        setIsPreviewSyncing(false);
       }
     },
-    [aspectRatio, buildPendingItemsFromComposition, effectiveLayoutConfig, mediaSlots, sceneDraft?.reference?.scene_graph, textLayers],
+    [
+      aspectRatio,
+      buildPendingItemsFromComposition,
+      effectiveLayoutConfig,
+      layerPlacements,
+      mediaSlots,
+      sceneDraft?.reference?.scene_graph,
+      sceneSnapshot,
+      textLayers,
+      uiState,
+    ],
   );
 
   useEffect(() => {
@@ -401,9 +453,9 @@ const SceneFlowPage: React.FC = () => {
     }
     const timer = window.setTimeout(() => {
       void syncPreviewComposition('auto');
-    }, 350);
+    }, 120);
     return () => window.clearTimeout(timer);
-  }, [effectiveLayoutConfig, mediaSlots, textLayers, aspectRatio, syncPreviewComposition]);
+  }, [effectiveLayoutConfig, layerPlacements, mediaSlots, textLayers, aspectRatio, sceneSnapshot, syncPreviewComposition]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -585,6 +637,46 @@ const SceneFlowPage: React.FC = () => {
     setEditingMap((prev) => ({ ...prev, [questionId]: !prev[questionId] }));
   }, []);
 
+  const applySnapshotResponse = useCallback(
+    (
+      payload: any,
+      nextLayoutConfig: LayoutConfig | undefined,
+      nextLayerPlan: any,
+      nextDraft: SceneDraft,
+      baseState: Record<string, any>,
+      successMessage: string,
+    ) => {
+      const snapshot = normalizeSceneSnapshot(payload?.snapshot);
+      const nextState = snapshot
+        ? applySceneSnapshotToUiState(nextLayoutConfig, baseState, snapshot)
+        : baseState;
+      const warnings = snapshot?.warnings?.filter(Boolean) || [];
+
+      setLayoutConfig(nextLayoutConfig);
+      setLayerPlan(nextLayerPlan);
+      setSceneDraft(nextDraft);
+      setUiState(nextState);
+      setSceneSnapshot(snapshot);
+      setLayerPlacements(snapshot ? buildLayerPlacementMap(snapshot) : {});
+      setPreviewComposition(null);
+      setPreviewItems([]);
+      setPreviewError(warnings.join(' '));
+      setLastRegeneratedGlobalSignature(buildGlobalControlSignature(nextLayoutConfig, nextState));
+      setGeneratedPrompt(
+        nextDraft.controls.positive_prompt ||
+          payload?.text_response ||
+          payload?.textResponse ||
+          nextDraft.brief.prompt ||
+          '',
+      );
+      setStatus({
+        type: 'success',
+        message: warnings.length ? `${successMessage}（${warnings[0]}）` : successMessage,
+      });
+    },
+    [],
+  );
+
   const handleGenerateEdit = useCallback(async () => {
     if (isSending) return;
     const initialPrompt = messages.find((m) => m.role === 'user')?.text ?? '';
@@ -603,21 +695,16 @@ const SceneFlowPage: React.FC = () => {
       const nextLayout = layoutPayload.layout_config ?? layoutPayload.layoutConfig;
       const nextDraft = normalizeSceneDraft(layoutPayload.draft, initialPrompt, selectedOptions);
       const nextLayerPlan = layoutPayload.layer_plan ?? layoutPayload.layerPlan ?? null;
-      setLayoutConfig(nextLayout);
-      setLayerPlan(nextLayerPlan);
-      setSceneDraft(nextDraft);
-      setGeneratedPrompt(
-        nextDraft.controls.positive_prompt ??
-          layoutPayload.draft?.controls?.positivePrompt ??
-          layoutPayload.text_response ??
-          layoutPayload.textResponse ??
-          '',
+      const stableLayout = ensureStableEditSections(nextLayout, nextLayerPlan, nextDraft);
+      const nextState = buildSceneUiState(stableLayout, nextDraft);
+      applySnapshotResponse(
+        layoutPayload,
+        stableLayout,
+        nextLayerPlan,
+        nextDraft,
+        nextState,
+        '编辑界面已就绪，开始准备素材吧。',
       );
-      setUiState(buildSceneUiState(ensureStableEditSections(nextLayout, nextLayerPlan, nextDraft), nextDraft));
-      setPreviewComposition(null);
-      setPreviewItems([]);
-      setPreviewError('');
-      setStatus({ type: 'success', message: '编辑界面已就绪，开始准备素材吧。' });
     } catch (error) {
       let message = '生成编辑界面失败。';
       if (axios.isAxiosError(error) && error.response) {
@@ -628,7 +715,7 @@ const SceneFlowPage: React.FC = () => {
     } finally {
       setIsWorking(false);
     }
-  }, [chatHistory, isSending, messages, selectedOptions]);
+  }, [applySnapshotResponse, chatHistory, isSending, messages, selectedOptions]);
 
   const handleStateChange = useCallback((componentId: string, value: any) => {
     setUiState((prev) => ({ ...prev, [componentId]: value }));
@@ -648,6 +735,13 @@ const SceneFlowPage: React.FC = () => {
     [],
   );
 
+  const handlePreviewLayerMove = useCallback((layerId: string, placement: LayerPlacement) => {
+    setLayerPlacements((prev) => ({
+      ...prev,
+      [layerId]: placement,
+    }));
+  }, []);
+
   const handleSlotUpload = useCallback(
     async (componentId: string, slotId: string, file: File) => {
       if (!file.type.startsWith('image/')) return;
@@ -661,125 +755,176 @@ const SceneFlowPage: React.FC = () => {
     [updateSlot],
   );
 
+  const handleRegenerateScene = useCallback(async () => {
+    const prompt = sceneDraft?.brief?.prompt || messages.find((m) => m.role === 'user')?.text || '';
+    if (!prompt) {
+      setStatus({ type: 'error', message: '缺少场景提示词，无法整图重生成。' });
+      return;
+    }
+
+    setIsWorking(true);
+    setStatus({ type: 'loading', message: '正在重新生成整张参考图...' });
+    try {
+      const response = await api.post('/scene/regenerate', {
+        prompt,
+        aspect_ratio: aspectRatio,
+        positive_prompt: generationControls.positivePrompt,
+        chat_history: chatHistory,
+        selected_options: selectedOptions,
+        ui_state: uiState,
+        draft: sceneDraft,
+        layer_plan: layerPlan,
+        scene_graph: sceneDraft?.reference?.scene_graph,
+      });
+      const payload = response.data || {};
+      const nextLayerPlan = payload.layer_plan ?? payload.layerPlan ?? layerPlan;
+      const nextDraft = normalizeSceneDraft(payload.draft, prompt, selectedOptions);
+      applySnapshotResponse(
+        payload,
+        effectiveLayoutConfig,
+        nextLayerPlan,
+        nextDraft,
+        uiState,
+        '整图已重新生成。',
+      );
+    } catch (error) {
+      const message = toApiErrorMessage(error, '整图重生成失败。');
+      setStatus({ type: 'error', message });
+      window.alert(message);
+    } finally {
+      setIsWorking(false);
+    }
+  }, [
+    applySnapshotResponse,
+    aspectRatio,
+    chatHistory,
+    effectiveLayoutConfig,
+    generationControls.positivePrompt,
+    layerPlan,
+    messages,
+    sceneDraft,
+    selectedOptions,
+    uiState,
+  ]);
+
   const handleSlotGenerate = useCallback(
     async (componentId: string, slot: MediaSlot) => {
+      if (slot.layerType === 'background') {
+        setStatus({ type: 'info', message: '背景由整图生成，请在右侧预览区点击“重新生成整图”。' });
+        return;
+      }
+      if (!sceneSnapshot?.referenceImageBase64) {
+        setStatus({ type: 'error', message: '当前没有可编辑的参考图，请先生成编辑界面。' });
+        return;
+      }
+      const targetLayer = findSnapshotLayerForSlot(sceneSnapshot, slot);
+      if (!targetLayer) {
+        setStatus({ type: 'error', message: `未找到要替换的图层：${slot.label}` });
+        return;
+      }
+
       setIsWorking(true);
-      setStatus({ type: 'loading', message: `正在生成素材：${slot.label}` });
+      setStatus({ type: 'loading', message: `正在替换对象：${slot.label}` });
       try {
-        const isBackground = slot.layerType === 'background';
-        const size = resolveSizeForSlot(isBackground, aspectRatio);
-        const imgRes = await api.post('/scene/materials/generate', {
-          prompt: slot.prompt,
-          width: size.width,
-          height: size.height,
-          layer_type: slot.layerType,
-          transparent_background: !isBackground,
-          reference_image_base64: sceneDraft?.reference?.image_base64 || null,
-          scene_graph: sceneDraft?.reference?.scene_graph || null,
-          reference_prompt: slot.label,
+        const prompt = sceneDraft?.brief?.prompt || messages.find((m) => m.role === 'user')?.text || '';
+        const response = await api.post('/scene/edit-layer', {
+          prompt,
+          aspect_ratio: aspectRatio,
+          positive_prompt: generationControls.positivePrompt,
+          reference_image_base64: sceneSnapshot.referenceImageBase64,
+          draft: sceneDraft,
+          layer_plan: layerPlan,
+          scene_graph: sceneDraft?.reference?.scene_graph,
+          target_layer_id: targetLayer.id,
+          target_layer_label: targetLayer.label,
+          target_layer_type: targetLayer.layerType,
+          edit_prompt: normalizeText(slot.prompt) || slot.label,
         });
-        const base64 = imgRes.data?.image_base64;
-        if (!base64) throw new Error('未返回图片数据');
-        const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
-        updateSlot(componentId, slot.id, (prev) => ({
-          ...prev,
-          uri: dataUrl,
-          hasTransparentBg: Boolean(imgRes.data?.transparent_background || !isBackground),
-        }));
-        setStatus({
-          type: 'success',
-          message: resolveImageGenerationStatusMessage(imgRes.data, '素材生成完成。'),
-        });
+        const payload = response.data || {};
+        const nextLayerPlan = payload.layer_plan ?? payload.layerPlan ?? layerPlan;
+        const nextDraft = normalizeSceneDraft(payload.draft, prompt, selectedOptions);
+        applySnapshotResponse(
+          payload,
+          effectiveLayoutConfig,
+          nextLayerPlan,
+          nextDraft,
+          uiState,
+          `${slot.label} 已替换。`,
+        );
       } catch (error) {
-        const msg = toApiErrorMessage(error, '生成素材失败。');
+        const msg = toApiErrorMessage(error, '替换对象失败。');
         setStatus({ type: 'error', message: msg });
         window.alert(msg);
       } finally {
         setIsWorking(false);
       }
     },
-    [aspectRatio, sceneDraft, updateSlot],
+    [
+      applySnapshotResponse,
+      aspectRatio,
+      effectiveLayoutConfig,
+      generationControls.positivePrompt,
+      layerPlan,
+      messages,
+      sceneDraft,
+      sceneSnapshot,
+      selectedOptions,
+      uiState,
+    ],
   );
 
   const handleGenerateAllSlots = useCallback(async () => {
-    if (!effectiveLayoutConfig) {
-      setStatus({ type: 'error', message: '请先生成编辑界面。' });
+    const prompt = sceneDraft?.brief?.prompt || messages.find((m) => m.role === 'user')?.text || '';
+    if (!prompt || !sceneSnapshot?.referenceImageBase64) {
+      setStatus({ type: 'error', message: '请先生成编辑界面，再重新识别图层。' });
       return;
     }
-    const ownerMap = new Map<string, string>();
-    (effectiveLayoutConfig.sections ?? []).forEach((section) => {
-      (section.components ?? []).forEach((component) => {
-        if (component.type === 'media-uploader') {
-          const stateSlots = uiState[component.id];
-          if (Array.isArray(stateSlots)) {
-            stateSlots.forEach((slot: MediaSlot) => {
-              ownerMap.set(slot.id, component.id);
-            });
-          }
-        }
-      });
-    });
-
-    const slotsToGenerate = mediaSlots.filter((slot) => !slot.uri);
-    if (!slotsToGenerate.length) {
-      setStatus({ type: 'success', message: '所有素材已就绪，无需再生成。' });
-      return;
-    }
-
     setIsWorking(true);
-    let fallbackCount = 0;
     try {
-      for (let i = 0; i < slotsToGenerate.length; i += 1) {
-        const slot = slotsToGenerate[i];
-        const componentId = ownerMap.get(slot.id);
-        if (!componentId) {
-          continue;
-        }
-        setStatus({
-          type: 'loading',
-          message: `正在生成素材 ${i + 1}/${slotsToGenerate.length}：${slot.label}`,
-        });
-        const isBackground = slot.layerType === 'background';
-        const size = resolveSizeForSlot(isBackground, aspectRatio);
-        const imgRes = await api.post('/scene/materials/generate', {
-          prompt: slot.prompt,
-          width: size.width,
-          height: size.height,
-          layer_type: slot.layerType,
-          transparent_background: !isBackground,
-          reference_image_base64: sceneDraft?.reference?.image_base64 || null,
-          scene_graph: sceneDraft?.reference?.scene_graph || null,
-          reference_prompt: slot.label,
-        });
-        const base64 = imgRes.data?.image_base64;
-        if (!base64) {
-          throw new Error('未返回图片数据');
-        }
-        if (imgRes.data?.fallback_used) {
-          fallbackCount += 1;
-        }
-        const dataUrl = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
-        updateSlot(componentId, slot.id, (prev) => ({
-          ...prev,
-          uri: dataUrl,
-          hasTransparentBg: Boolean(imgRes.data?.transparent_background || !isBackground),
-        }));
-      }
-      setStatus({
-        type: 'success',
-        message:
-          fallbackCount > 0
-            ? `批量生成完成（${slotsToGenerate.length} 个，其中 ${fallbackCount} 个使用占位图）。`
-            : `批量生成完成（${slotsToGenerate.length} 个）。`,
+      setStatus({ type: 'loading', message: '正在重新识别图层...' });
+      const response = await api.post('/scene/resegment', {
+        prompt,
+        aspect_ratio: aspectRatio,
+        positive_prompt: generationControls.positivePrompt,
+        chat_history: chatHistory,
+        selected_options: selectedOptions,
+        ui_state: uiState,
+        draft: sceneDraft,
+        layer_plan: layerPlan,
+        scene_graph: sceneDraft?.reference?.scene_graph,
+        reference_image_base64: sceneSnapshot.referenceImageBase64,
       });
+      const payload = response.data || {};
+      const nextLayerPlan = payload.layer_plan ?? payload.layerPlan ?? layerPlan;
+      const nextDraft = normalizeSceneDraft(payload.draft, prompt, selectedOptions);
+      applySnapshotResponse(
+        payload,
+        effectiveLayoutConfig,
+        nextLayerPlan,
+        nextDraft,
+        uiState,
+        '图层已重新识别。',
+      );
     } catch (error) {
-      const msg = toApiErrorMessage(error, '批量生成失败。');
+      const msg = toApiErrorMessage(error, '重新识别图层失败。');
       setStatus({ type: 'error', message: msg });
       window.alert(msg);
     } finally {
       setIsWorking(false);
     }
-  }, [aspectRatio, effectiveLayoutConfig, mediaSlots, sceneDraft, uiState, updateSlot]);
+  }, [
+    applySnapshotResponse,
+    aspectRatio,
+    chatHistory,
+    effectiveLayoutConfig,
+    generationControls.positivePrompt,
+    layerPlan,
+    messages,
+    sceneDraft,
+    sceneSnapshot,
+    selectedOptions,
+    uiState,
+  ]);
 
   const handleSlotRemoveBackground = useCallback(
     async (componentId: string, slot: MediaSlot) => {
@@ -813,8 +958,11 @@ const SceneFlowPage: React.FC = () => {
     setIsWorking(true);
     setStatus({ type: 'loading', message: '正在同步当前预览并进入画布...' });
     try {
-      const latest = await syncPreviewComposition('manual');
-      const items = latest ? buildPendingItemsFromComposition(latest) : previewItems;
+      const latest = await syncPreviewComposition('manual', { throwOnError: true });
+      if (!latest) {
+        throw new Error('预览同步失败，请稍后重试。');
+      }
+      const items = buildPendingItemsFromComposition(latest);
       if (!items.length) {
         throw new Error('当前没有可导入画布的预览结果。');
       }
@@ -827,7 +975,7 @@ const SceneFlowPage: React.FC = () => {
     } finally {
       setIsWorking(false);
     }
-  }, [buildPendingItemsFromComposition, navigate, previewItems, syncPreviewComposition]);
+  }, [buildPendingItemsFromComposition, navigate, syncPreviewComposition]);
 
   const handleQuickGenerate = useCallback(async () => {
     const prompt = quickPrompt.trim();
@@ -1060,6 +1208,10 @@ const SceneFlowPage: React.FC = () => {
   const previewCanvasWidth = previewComposition?.canvasWidth || resolveSizeForSlot(true, aspectRatio).width;
   const previewCanvasHeight = previewComposition?.canvasHeight || resolveSizeForSlot(true, aspectRatio).height;
   if (effectiveLayoutConfig) {
+    const previewBackgroundUri =
+      mediaSlots.find((slot) => slot.layerType === 'background')?.uri ||
+      toImageDataUrl(sceneSnapshot?.cleanPlateImageBase64 || sceneSnapshot?.referenceImageBase64) ||
+      null;
     return (
       <SceneEditWorkspace
         activeStep={activeStep}
@@ -1069,9 +1221,12 @@ const SceneFlowPage: React.FC = () => {
         isPreviewSyncing={isPreviewSyncing}
         previewError={previewError}
         previewComposition={previewComposition}
-        previewItemsCount={previewItems.length}
+        previewBackgroundUri={previewBackgroundUri}
+        previewItemsCount={previewComposition?.layers.length || 0}
         previewCanvasWidth={previewCanvasWidth}
         previewCanvasHeight={previewCanvasHeight}
+        hasPendingGlobalChanges={hasPendingGlobalChanges}
+        snapshotWarnings={sceneSnapshot?.warnings || []}
         layerPlan={layerPlan}
         sceneDraft={sceneDraft}
         materialsSection={materialsSection}
@@ -1084,8 +1239,10 @@ const SceneFlowPage: React.FC = () => {
         onSlotGenerate={handleSlotGenerate}
         onSlotRemoveBackground={handleSlotRemoveBackground}
         onGenerateAllSlots={handleGenerateAllSlots}
+        onRegenerateScene={handleRegenerateScene}
+        onLayerPlacementChange={handlePreviewLayerMove}
         onEnterCanvas={handleEnterCanvas}
-        enterCanvasDisabled={(isSending || isWorking) || isPreviewSyncing || !previewItems.length}
+        enterCanvasDisabled={(isSending || isWorking) || isPreviewSyncing || hasPendingGlobalChanges || !previewItems.length}
       />
     );
   }
@@ -2326,6 +2483,349 @@ function collectTextLayers(
     if (!unique.has(key)) unique.set(key, item);
   });
   return Array.from(unique.values()).slice(0, 4);
+}
+
+function resolveGenerationControls(
+  layoutConfig: LayoutConfig | undefined,
+  uiState: Record<string, any>,
+  sceneDraft: SceneDraft | undefined,
+): GenerationControls {
+  const defaults: GenerationControls = {
+    positivePrompt: safeText(sceneDraft?.controls?.positive_prompt, safeText(sceneDraft?.brief?.prompt)),
+    negativePrompt: safeText(sceneDraft?.controls?.negative_prompt),
+    steps: safeNumber(sceneDraft?.controls?.steps, 28),
+    guidanceScale: safeNumber(sceneDraft?.controls?.cfg_scale, 7),
+    seedLocked: Boolean(sceneDraft?.controls?.seed_locked),
+  };
+  if (!layoutConfig?.sections?.length) {
+    return defaults;
+  }
+
+  const next = { ...defaults };
+  layoutConfig.sections.forEach((section) => {
+    (section.components ?? []).forEach((component: any) => {
+      if (component.type === 'prompt-editor') {
+        const current = uiState[component.id];
+        const promptFields = current && typeof current === 'object' ? current : {};
+        const fields = Array.isArray(component.fields) ? component.fields : [];
+        fields.forEach((field: any) => {
+          const sample = `${field?.id || ''} ${field?.label || ''} ${field?.placeholder || ''}`.toLowerCase();
+          const value = normalizeText(promptFields[field?.id] ?? field?.default);
+          if (!value) return;
+          if (/negative|负向/.test(sample)) {
+            next.negativePrompt = value;
+            return;
+          }
+          if (/positive|正向/.test(sample)) {
+            next.positivePrompt = value;
+          }
+        });
+        return;
+      }
+      if (isStepsComponent(component)) {
+        next.steps = safeNumber(uiState[component.id], next.steps);
+        return;
+      }
+      if (isCfgScaleComponent(component)) {
+        next.guidanceScale = safeNumber(uiState[component.id], next.guidanceScale);
+        return;
+      }
+      if (isSeedLockComponent(component)) {
+        next.seedLocked = Boolean(uiState[component.id]);
+      }
+    });
+  });
+
+  return next;
+}
+
+function buildGlobalControlSignature(
+  layoutConfig: LayoutConfig | undefined,
+  uiState: Record<string, any>,
+): string {
+  if (!layoutConfig?.sections?.length) return '';
+  const entries: Array<[string, unknown]> = [];
+  layoutConfig.sections.forEach((section) => {
+    if (isReservedSection(section) || isCopySection(section)) return;
+    (section.components ?? []).forEach((component: any) => {
+      if (component.type === 'media-uploader') return;
+      entries.push([component.id, normalizeSerializableValue(uiState[component.id])]);
+    });
+  });
+  return stableSerialize(entries);
+}
+
+function normalizeSerializableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeSerializableValue(item));
+  }
+  if (value && typeof value === 'object') {
+    const next: Record<string, unknown> = {};
+    Object.keys(value as Record<string, unknown>)
+      .sort()
+      .forEach((key) => {
+        next[key] = normalizeSerializableValue((value as Record<string, unknown>)[key]);
+      });
+    return next;
+  }
+  return value;
+}
+
+function stableSerialize(value: unknown): string {
+  try {
+    return JSON.stringify(normalizeSerializableValue(value));
+  } catch {
+    return '';
+  }
+}
+
+function normalizeSceneSnapshot(value: any): SceneSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const referenceImageBase64 = safeText(value.reference_image_base64 ?? value.referenceImageBase64);
+  if (!referenceImageBase64) return null;
+  const layers = Array.isArray(value.layers)
+    ? value.layers.map((layer: any, index: number) => ({
+        id: safeText(layer?.id, `scene-layer-${index + 1}`),
+        label: safeText(layer?.label, `图层 ${index + 1}`),
+        layerType: normalizeLayerType(layer?.layer_type ?? layer?.layerType),
+        bbox: {
+          x: safeNumber(layer?.bbox?.x, 0.1),
+          y: safeNumber(layer?.bbox?.y, 0.1),
+          w: safeNumber(layer?.bbox?.w, 0.3),
+          h: safeNumber(layer?.bbox?.h, 0.3),
+        },
+        width: safeNumber(layer?.width, 512),
+        height: safeNumber(layer?.height, 512),
+        zIndex: safeNumber(layer?.z_index ?? layer?.zIndex, index + 1),
+        cutoutImageBase64: safeText(layer?.cutout_image_base64 ?? layer?.cutoutImageBase64),
+        maskImageBase64: safeText(layer?.mask_image_base64 ?? layer?.maskImageBase64),
+        sourcePrompt: safeText(layer?.source_prompt ?? layer?.sourcePrompt, safeText(layer?.label, `图层 ${index + 1}`)),
+        editable: layer?.editable !== false,
+      }))
+    : [];
+
+  return {
+    revisionId: safeText(value.revision_id ?? value.revisionId, `snapshot-${Date.now()}`),
+    referenceImageBase64,
+    cleanPlateImageBase64: safeText(value.clean_plate_image_base64 ?? value.cleanPlateImageBase64, referenceImageBase64),
+    width: safeNumber(value.width, 1536),
+    height: safeNumber(value.height, 2048),
+    layers,
+    warnings: Array.isArray(value.warnings) ? value.warnings.map((item: unknown) => safeText(item)).filter(Boolean) : [],
+    segmentationFallbackUsed: Boolean(value.segmentation_fallback_used ?? value.segmentationFallbackUsed),
+    cleanPlateFallbackUsed: Boolean(value.clean_plate_fallback_used ?? value.cleanPlateFallbackUsed),
+  };
+}
+
+function toImageDataUrl(value: string | undefined): string | undefined {
+  const base64 = safeText(value);
+  if (!base64) return undefined;
+  if (base64.startsWith('data:')) return base64;
+  return `data:image/png;base64,${base64}`;
+}
+
+function findSlotMatch(left: Pick<MediaSlot, 'id' | 'label' | 'layerType'>, right: Pick<MediaSlot, 'id' | 'label' | 'layerType'>): boolean {
+  return (
+    safeText(left.id) === safeText(right.id) ||
+    (
+      normalizeLayerType(left.layerType) === normalizeLayerType(right.layerType) &&
+      safeText(left.label) === safeText(right.label)
+    )
+  );
+}
+
+function findSnapshotLayerForSlot(snapshot: SceneSnapshot, slot: Pick<MediaSlot, 'id' | 'label' | 'layerType'>): SceneSnapshotLayer | undefined {
+  return snapshot.layers.find((layer) =>
+    safeText(layer.id) === safeText(slot.id) ||
+    (
+      normalizeLayerType(layer.layerType) === normalizeLayerType(slot.layerType) &&
+      safeText(layer.label) === safeText(slot.label)
+    ),
+  );
+}
+
+function buildLayerPlacementMap(snapshot: SceneSnapshot): Record<string, LayerPlacement> {
+  return snapshot.layers.reduce<Record<string, LayerPlacement>>((acc, layer) => {
+    acc[layer.id] = {
+      x: safeNumber(layer.bbox.x, 0.1),
+      y: safeNumber(layer.bbox.y, 0.1),
+      w: safeNumber(layer.bbox.w, 0.3),
+      h: safeNumber(layer.bbox.h, 0.3),
+      zIndex: safeNumber(layer.zIndex, 1),
+    };
+    return acc;
+  }, {});
+}
+
+function applySceneSnapshotToUiState(
+  layoutConfig: LayoutConfig | undefined,
+  prevUiState: Record<string, any>,
+  snapshot: SceneSnapshot,
+): Record<string, any> {
+  if (!layoutConfig?.sections?.length) return prevUiState;
+  const existingSlots = extractMediaSlots(layoutConfig, prevUiState);
+  const nextSlots = buildMediaSlotsFromSnapshot(snapshot, existingSlots);
+  const nextState = { ...prevUiState };
+  layoutConfig.sections.forEach((section) => {
+    (section.components ?? []).forEach((component: any) => {
+      if (component.type === 'media-uploader') {
+        nextState[component.id] = nextSlots.map((slot) => ({ ...slot }));
+      }
+    });
+  });
+  return nextState;
+}
+
+function buildMediaSlotsFromSnapshot(snapshot: SceneSnapshot, existingSlots: MediaSlot[]): MediaSlot[] {
+  const backgroundMatch = existingSlots.find((slot) => slot.layerType === 'background');
+  const backgroundSlot: MediaSlot = {
+    id: backgroundMatch?.id || 'scene-background',
+    label: backgroundMatch?.label || '背景',
+    layerType: 'background',
+    prompt: backgroundMatch?.prompt || '场景背景',
+    uri: toImageDataUrl(snapshot.cleanPlateImageBase64 || snapshot.referenceImageBase64),
+    hasTransparentBg: false,
+  };
+
+  const visualLayers = snapshot.layers.map((layer) => {
+    const match = existingSlots.find((slot) =>
+      findSlotMatch(slot, { id: layer.id, label: layer.label, layerType: layer.layerType }),
+    );
+    return {
+      id: layer.id,
+      label: layer.label,
+      layerType: layer.layerType,
+      prompt: normalizeText(match?.prompt) || normalizeText(layer.sourcePrompt) || `替换${layer.label}`,
+      uri: toImageDataUrl(layer.cutoutImageBase64),
+      hasTransparentBg: true,
+    } as MediaSlot;
+  });
+
+  return [backgroundSlot, ...visualLayers];
+}
+
+function buildLocalPreviewComposition(input: {
+  snapshot: SceneSnapshot | null;
+  mediaSlots: MediaSlot[];
+  textLayers: TextLayerDraft[];
+  sceneGraph: SceneDraft['reference']['scene_graph'] | undefined;
+  placements: Record<string, LayerPlacement>;
+  aspectRatio: string;
+  layoutConfig: LayoutConfig | undefined;
+  uiState: Record<string, any>;
+}): PreviewComposition {
+  const canvasWidth = input.snapshot?.width || resolveSizeForSlot(true, input.aspectRatio).width;
+  const canvasHeight = input.snapshot?.height || resolveSizeForSlot(true, input.aspectRatio).height;
+  const paletteColor = findPrimaryColor(input.layoutConfig, input.uiState) || '#111827';
+  const layers: any[] = [];
+
+  input.mediaSlots
+    .filter((slot) => slot.layerType !== 'background' && slot.uri)
+    .forEach((slot, index) => {
+      const snapshotLayer = input.snapshot ? findSnapshotLayerForSlot(input.snapshot, slot) : undefined;
+      const placement = input.placements[slot.id]
+        || (snapshotLayer
+          ? {
+              x: snapshotLayer.bbox.x,
+              y: snapshotLayer.bbox.y,
+              w: snapshotLayer.bbox.w,
+              h: snapshotLayer.bbox.h,
+              zIndex: snapshotLayer.zIndex,
+            }
+          : {
+              x: 0.2 + index * 0.04,
+              y: 0.22 + index * 0.04,
+              w: 0.32,
+              h: 0.32,
+              zIndex: index + 1,
+            });
+      layers.push({
+        id: slot.id,
+        slotId: slot.id,
+        name: slot.label,
+        kind: 'image',
+        dataUrl: slot.uri,
+        x: placement.x * canvasWidth,
+        y: placement.y * canvasHeight,
+        width: placement.w * canvasWidth,
+        height: placement.h * canvasHeight,
+        placement,
+        draggable: true,
+      });
+    });
+
+  const textZone = input.sceneGraph?.text_safe_zone || { x: 0.08, y: 0.1, w: 0.36, h: 0.28 };
+  const hasText = input.textLayers.some((layer) => normalizeText(layer.text));
+  if (hasText) {
+    const zoneX = textZone.x * canvasWidth;
+    const zoneY = textZone.y * canvasHeight;
+    const zoneW = textZone.w * canvasWidth;
+    const zoneH = textZone.h * canvasHeight;
+    layers.push({
+      id: 'text-panel',
+      kind: 'shape',
+      name: '文案底板',
+      x: zoneX,
+      y: zoneY,
+      width: zoneW,
+      height: zoneH,
+      placement: { x: textZone.x, y: textZone.y, w: textZone.w, h: textZone.h, zIndex: 100 },
+      style: {
+        fill: 'rgba(255,255,255,0.78)',
+        radius: 28,
+      },
+    });
+    const gap = Math.max(12, zoneH * 0.04);
+    let cursorY = zoneY + Math.max(18, zoneH * 0.08);
+    input.textLayers
+      .filter((layer) => normalizeText(layer.text))
+      .forEach((layer) => {
+        const fontSize =
+          layer.role === 'title'
+            ? Math.max(42, zoneW * 0.12)
+            : layer.role === 'subtitle'
+              ? Math.max(24, zoneW * 0.07)
+              : Math.max(18, zoneW * 0.045);
+        const layerHeight =
+          layer.role === 'body'
+            ? Math.max(90, zoneH * 0.3)
+            : Math.max(fontSize * 1.6, zoneH * (layer.role === 'title' ? 0.24 : 0.16));
+        layers.push({
+          id: layer.id,
+          kind: 'text',
+          name: layer.name,
+          text: layer.text,
+          x: zoneX,
+          y: cursorY,
+          width: zoneW,
+          height: Math.min(layerHeight, zoneY + zoneH - cursorY),
+          placement: {
+            x: zoneX / canvasWidth,
+            y: cursorY / canvasHeight,
+            w: zoneW / canvasWidth,
+            h: Math.min(layerHeight, zoneY + zoneH - cursorY) / canvasHeight,
+            zIndex: 101,
+          },
+          style: {
+            color: layer.color || paletteColor,
+            fontSize,
+            fontWeight: layer.role === 'body' ? 500 : 800,
+            align: layer.align || 'left',
+            padding: 0,
+            lineHeight: layer.role === 'body' ? 1.5 : 1.15,
+          },
+        });
+        cursorY += Math.min(layerHeight, zoneY + zoneH - cursorY) + gap;
+      });
+  }
+
+  layers.sort((left, right) => safeNumber(left?.placement?.zIndex, 0) - safeNumber(right?.placement?.zIndex, 0));
+  return {
+    layers,
+    canvasWidth,
+    canvasHeight,
+    updatedAt: Date.now(),
+  };
 }
 
 function findPrimaryColor(layoutConfig: LayoutConfig | undefined, uiState: Record<string, any>): string | undefined {

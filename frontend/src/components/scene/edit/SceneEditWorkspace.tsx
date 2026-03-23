@@ -59,9 +59,12 @@ type SceneEditWorkspaceProps = {
   isPreviewSyncing: boolean;
   previewError: string;
   previewComposition: PreviewComposition | null;
+  previewBackgroundUri: string | null;
   previewItemsCount: number;
   previewCanvasWidth: number;
   previewCanvasHeight: number;
+  hasPendingGlobalChanges: boolean;
+  snapshotWarnings: string[];
   layerPlan: any;
   sceneDraft?: SceneDraft;
   materialsSection?: LayoutSection;
@@ -74,6 +77,8 @@ type SceneEditWorkspaceProps = {
   onSlotGenerate: (componentId: string, slot: MediaSlot) => void;
   onSlotRemoveBackground: (componentId: string, slot: MediaSlot) => void;
   onGenerateAllSlots: () => void;
+  onRegenerateScene: () => void;
+  onLayerPlacementChange: (layerId: string, placement: { x: number; y: number; w: number; h: number; zIndex: number }) => void;
   onEnterCanvas: () => void;
   enterCanvasDisabled: boolean;
 };
@@ -86,9 +91,12 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
   isPreviewSyncing,
   previewError,
   previewComposition,
+  previewBackgroundUri,
   previewItemsCount,
   previewCanvasWidth,
   previewCanvasHeight,
+  hasPendingGlobalChanges,
+  snapshotWarnings,
   layerPlan,
   sceneDraft,
   materialsSection,
@@ -101,10 +109,11 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
   onSlotGenerate,
   onSlotRemoveBackground,
   onGenerateAllSlots,
+  onRegenerateScene,
+  onLayerPlacementChange,
   onEnterCanvas,
   enterCanvasDisabled,
 }) => {
-  const previewBackground = mediaSlots.find((slot) => slot.layerType === 'background')?.uri || null;
   const filledSlotCount = mediaSlots.filter((slot) => slot.uri).length;
   const copySections = useMemo(
     () => configSections.filter((section) => isCopySection(section)),
@@ -299,13 +308,57 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
                 <PreviewCanvas
                   width={previewCanvasWidth}
                   height={previewCanvasHeight}
-                  backgroundUri={previewBackground}
+                  backgroundUri={previewBackgroundUri}
                   layers={previewComposition?.layers || []}
+                  onLayerPlacementChange={onLayerPlacementChange}
                 />
                 {isPreviewSyncing ? (
                   <LinearProgress sx={{ position: 'absolute', left: 0, right: 0, top: 0 }} />
                 ) : null}
+                {hasPendingGlobalChanges ? (
+                  <Box
+                    sx={{
+                      position: 'absolute',
+                      inset: 0,
+                      background: 'rgba(15, 23, 42, 0.36)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      zIndex: 3,
+                      p: 2,
+                    }}
+                  >
+                    <Card
+                      sx={{
+                        px: 2.5,
+                        py: 2,
+                        minWidth: 280,
+                        maxWidth: 360,
+                        textAlign: 'center',
+                        borderRadius: 3,
+                        boxShadow: '0 24px 60px rgba(15, 23, 42, 0.24)',
+                      }}
+                    >
+                      <Stack spacing={1.5} alignItems="center">
+                        <AutoAwesomeIcon color="primary" />
+                        <Typography variant="subtitle1">全局配置已变更</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          当前预览还是旧版本。点击后会重新生成整张参考图，并自动拆层与补背景。
+                        </Typography>
+                        <Button variant="contained" onClick={onRegenerateScene} disabled={isWorking}>
+                          重新生成整图
+                        </Button>
+                      </Stack>
+                    </Card>
+                  </Box>
+                ) : null}
               </Box>
+
+              {previewError || snapshotWarnings.length ? (
+                <Alert severity={previewError ? 'warning' : 'info'}>
+                  {previewError || snapshotWarnings[0]}
+                </Alert>
+              ) : null}
 
               {textLayers.length ? (
                 <Card variant="outlined">
@@ -326,10 +379,20 @@ const SceneEditWorkspace: React.FC<SceneEditWorkspaceProps> = ({
               )}
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-                <Chip label="预览自动同步" size="small" variant="outlined" />
-                <Button variant="contained" onClick={onEnterCanvas} disabled={enterCanvasDisabled}>
-                  进入画布
-                </Button>
+                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                  <Chip label="预览自动同步" size="small" variant="outlined" />
+                  <Button variant="outlined" onClick={onGenerateAllSlots} disabled={isWorking}>
+                    重新识别图层
+                  </Button>
+                </Stack>
+                <Stack direction="row" spacing={1}>
+                  <Button variant="outlined" onClick={onRegenerateScene} disabled={isWorking}>
+                    重新生成整图
+                  </Button>
+                  <Button variant="contained" onClick={onEnterCanvas} disabled={enterCanvasDisabled}>
+                    进入画布
+                  </Button>
+                </Stack>
               </Box>
             </CardContent>
           </Card>
@@ -555,7 +618,7 @@ const SceneSetupCard: React.FC<SceneSetupCardProps> = ({
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
             <Chip label={`素材 ${filledSlotCount}/${mediaSlots.length}`} size="small" />
             <Button variant="outlined" size="small" onClick={onGenerateAllSlots} disabled={disabled}>
-              一键生成所有图层
+              重新识别图层
             </Button>
           </Stack>
         </Stack>
@@ -683,6 +746,7 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
 }) => {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const expectsTransparent = slot.layerType !== 'background';
+  const isBackground = slot.layerType === 'background';
 
   const updateSlot = (updater: (slotValue: MediaSlot) => MediaSlot) => {
     onStateChange(
@@ -724,12 +788,17 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
             <IconButton onClick={() => fileInputRef.current?.click()} disabled={disabled} title="上传" size="small">
               <UploadFileIcon fontSize="small" />
             </IconButton>
-            <IconButton onClick={() => onSlotGenerate(componentId, slot)} disabled={disabled} title="生成" size="small">
+            <IconButton
+              onClick={() => onSlotGenerate(componentId, slot)}
+              disabled={disabled || isBackground}
+              title={isBackground ? '背景跟随整图生成' : '替换当前对象'}
+              size="small"
+            >
               <AutoAwesomeIcon fontSize="small" />
             </IconButton>
             <IconButton
               onClick={() => onSlotRemoveBackground(componentId, slot)}
-              disabled={disabled || slot.layerType === 'background' || !slot.uri}
+              disabled={disabled || isBackground || !slot.uri}
               title="抠图"
               size="small"
             >
@@ -754,7 +823,7 @@ const MaterialSlotInlineCard: React.FC<MaterialSlotInlineCardProps> = ({
           multiline
           minRows={3}
           disabled={disabled}
-          helperText={expectsTransparent ? '优先透明底。' : '写完整场景。'}
+          helperText={isBackground ? '背景由整图统一生成。' : expectsTransparent ? '点击魔法棒会替换当前对象。' : '写完整场景。'}
         />
 
         <Box
@@ -804,13 +873,50 @@ const PreviewCanvas: React.FC<{
   height: number;
   backgroundUri: string | null;
   layers: any[];
-}> = ({ width, height, backgroundUri, layers }) => {
+  onLayerPlacementChange: (layerId: string, placement: { x: number; y: number; w: number; h: number; zIndex: number }) => void;
+}> = ({ width, height, backgroundUri, layers, onLayerPlacementChange }) => {
   const safeWidth = Math.max(1, width || 1);
   const safeHeight = Math.max(1, height || 1);
+  const frameRef = React.useRef<HTMLDivElement | null>(null);
+  const dragRef = React.useRef<{
+    layerId: string;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    placement: { x: number; y: number; w: number; h: number; zIndex: number };
+  } | null>(null);
+
+  React.useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!dragRef.current || !frameRef.current) return;
+      const rect = frameRef.current.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const dx = (event.clientX - dragRef.current.startX) / rect.width;
+      const dy = (event.clientY - dragRef.current.startY) / rect.height;
+      const nextX = clamp01(dragRef.current.originX + dx, 1 - dragRef.current.placement.w);
+      const nextY = clamp01(dragRef.current.originY + dy, 1 - dragRef.current.placement.h);
+      onLayerPlacementChange(dragRef.current.layerId, {
+        ...dragRef.current.placement,
+        x: nextX,
+        y: nextY,
+      });
+    };
+    const handlePointerUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [onLayerPlacementChange]);
 
   return (
     <Box sx={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
       <Box
+        ref={frameRef}
         sx={{
           width: '100%',
           maxHeight: '100%',
@@ -819,92 +925,138 @@ const PreviewCanvas: React.FC<{
           overflow: 'hidden',
           boxShadow: '0 24px 60px rgba(15, 23, 42, 0.18)',
           backgroundColor: '#f8fafc',
+          position: 'relative',
         }}
       >
-        <svg
-          viewBox={`0 0 ${safeWidth} ${safeHeight}`}
-          width="100%"
-          height="100%"
-          preserveAspectRatio="xMidYMid meet"
-        >
-          <rect x="0" y="0" width={safeWidth} height={safeHeight} fill="#f3f6fa" />
-          {backgroundUri ? (
-            <image href={backgroundUri} x="0" y="0" width={safeWidth} height={safeHeight} preserveAspectRatio="xMidYMid slice" />
-          ) : null}
-          {layers.map((layer: any) => {
-            const x = Number(layer?.placement?.x ?? 0);
-            const y = Number(layer?.placement?.y ?? 0);
-            const layerWidth = Number(layer?.width ?? 0);
-            const layerHeight = Number(layer?.height ?? 0);
-            if ((layer.kind || 'image') === 'image') {
-              const href = layer.image_base64?.startsWith('data:')
-                ? layer.image_base64
-                : `data:image/png;base64,${layer.image_base64 || ''}`;
-              return (
-                <image
-                  key={layer.id || `${layer.name}-${x}-${y}`}
-                  href={href}
-                  x={x}
-                  y={y}
-                  width={layerWidth}
-                  height={layerHeight}
-                  preserveAspectRatio="xMidYMid meet"
-                />
-              );
-            }
-            if (layer.kind === 'shape') {
-              return (
-                <rect
-                  key={layer.id || `${layer.name}-${x}-${y}`}
-                  x={x}
-                  y={y}
-                  width={layerWidth}
-                  height={layerHeight}
-                  rx={Number(layer.style?.radius ?? 24)}
-                  ry={Number(layer.style?.radius ?? 24)}
-                  fill={layer.style?.fill || 'rgba(255,255,255,0.72)'}
-                />
-              );
-            }
+        <Box sx={{ position: 'absolute', inset: 0, background: '#f3f6fa' }} />
+        {backgroundUri ? (
+          <Box
+            component="img"
+            src={backgroundUri}
+            alt="preview-background"
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              userSelect: 'none',
+              WebkitUserDrag: 'none',
+            }}
+          />
+        ) : null}
+        {layers.map((layer: any) => {
+          const placement = layer?.placement || {};
+          const left = `${Number(placement.x ?? 0) * 100}%`;
+          const top = `${Number(placement.y ?? 0) * 100}%`;
+          const layerWidth = `${Number(placement.w ?? 0) * 100}%`;
+          const layerHeight = `${Number(placement.h ?? 0) * 100}%`;
+
+          if ((layer.kind || 'image') === 'image') {
             return (
-              <foreignObject
-                key={layer.id || `${layer.name}-${x}-${y}`}
-                x={x}
-                y={y}
-                width={layerWidth}
-                height={layerHeight}
+              <Box
+                key={layer.id || `${layer.name}-${left}-${top}`}
+                sx={{
+                  position: 'absolute',
+                  left,
+                  top,
+                  width: layerWidth,
+                  height: layerHeight,
+                  zIndex: Number(placement.zIndex ?? 1),
+                  cursor: layer.draggable ? 'grab' : 'default',
+                  userSelect: 'none',
+                }}
+                onPointerDown={(event) => {
+                  if (!layer.draggable || !layer.slotId) return;
+                  event.preventDefault();
+                  dragRef.current = {
+                    layerId: layer.slotId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originX: Number(placement.x ?? 0),
+                    originY: Number(placement.y ?? 0),
+                    placement: {
+                      x: Number(placement.x ?? 0),
+                      y: Number(placement.y ?? 0),
+                      w: Number(placement.w ?? 0),
+                      h: Number(placement.h ?? 0),
+                      zIndex: Number(placement.zIndex ?? 1),
+                    },
+                  };
+                }}
               >
-                <div
-                  xmlns="http://www.w3.org/1999/xhtml"
-                  style={{
+                <Box
+                  component="img"
+                  src={layer.dataUrl}
+                  alt={layer.name || layer.id || 'preview-layer'}
+                  sx={{
                     width: '100%',
                     height: '100%',
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    justifyContent:
-                      layer.style?.align === 'center'
-                        ? 'center'
-                        : layer.style?.align === 'right'
-                          ? 'flex-end'
-                          : 'flex-start',
-                    color: layer.style?.color || '#111827',
-                    fontSize: `${layer.style?.fontSize || 48}px`,
-                    fontWeight: layer.style?.fontWeight || 700,
-                    lineHeight: String(layer.style?.lineHeight || 1.2),
-                    background: layer.style?.backgroundColor || 'transparent',
-                    padding: `${layer.style?.padding || 18}px`,
-                    boxSizing: 'border-box',
-                    whiteSpace: 'pre-wrap',
-                    overflow: 'hidden',
-                    textAlign: layer.style?.align || 'left',
+                    objectFit: 'contain',
+                    display: 'block',
+                    pointerEvents: 'none',
+                    filter: 'drop-shadow(0 18px 26px rgba(15, 23, 42, 0.18))',
+                    userSelect: 'none',
+                    WebkitUserDrag: 'none',
                   }}
-                >
-                  {layer.text || ''}
-                </div>
-              </foreignObject>
+                />
+              </Box>
             );
-          })}
-        </svg>
+          }
+
+          if (layer.kind === 'shape') {
+            return (
+              <Box
+                key={layer.id || `${layer.name}-${left}-${top}`}
+                sx={{
+                  position: 'absolute',
+                  left,
+                  top,
+                  width: layerWidth,
+                  height: layerHeight,
+                  zIndex: Number(placement.zIndex ?? 1),
+                  borderRadius: `${Number(layer.style?.radius ?? 24)}px`,
+                  background: layer.style?.fill || 'rgba(255,255,255,0.72)',
+                  boxShadow: '0 16px 40px rgba(15, 23, 42, 0.08)',
+                }}
+              />
+            );
+          }
+
+          return (
+            <Box
+              key={layer.id || `${layer.name}-${left}-${top}`}
+              sx={{
+                position: 'absolute',
+                left,
+                top,
+                width: layerWidth,
+                height: layerHeight,
+                zIndex: Number(placement.zIndex ?? 1),
+                color: layer.style?.color || '#111827',
+                fontSize: `${layer.style?.fontSize || 48}px`,
+                fontWeight: layer.style?.fontWeight || 700,
+                lineHeight: String(layer.style?.lineHeight || 1.2),
+                background: layer.style?.backgroundColor || 'transparent',
+                p: `${layer.style?.padding || 0}px`,
+                boxSizing: 'border-box',
+                whiteSpace: 'pre-wrap',
+                overflow: 'hidden',
+                textAlign: layer.style?.align || 'left',
+                display: 'flex',
+                justifyContent:
+                  layer.style?.align === 'center'
+                    ? 'center'
+                    : layer.style?.align === 'right'
+                      ? 'flex-end'
+                      : 'flex-start',
+                alignItems: 'flex-start',
+              }}
+            >
+              {layer.text || ''}
+            </Box>
+          );
+        })}
       </Box>
     </Box>
   );
@@ -1052,6 +1204,10 @@ function formatLayerPlacement(placement: any): string {
     return `位置 x:${Math.round(placement.x * 100)}% y:${Math.round(placement.y * 100)}%`;
   }
   return '';
+}
+
+function clamp01(value: number, max = 1): number {
+  return Math.max(0, Math.min(max, value));
 }
 
 export default SceneEditWorkspace;

@@ -269,6 +269,7 @@ class ImageRequest(BaseModel):
     reference_bbox: Optional[dict] = None
     scene_graph: Optional[dict] = None
     reference_prompt: Optional[str] = None
+    seed: Optional[int] = None
 
 
 class LayoutRequest(BaseModel):
@@ -283,6 +284,33 @@ class ScenePreviewRequest(BaseModel):
     text_layers: Optional[List[dict]] = None
     text_panel_fill: Optional[str] = None
     scene_graph: Optional[dict] = None
+
+
+class SceneSnapshotRequest(BaseModel):
+    prompt: str
+    aspect_ratio: Optional[str] = "3:4"
+    positive_prompt: Optional[str] = None
+    chat_history: Optional[str] = None
+    selected_options: Optional[dict] = None
+    ui_state: Optional[dict] = None
+    draft: Optional[dict] = None
+    layer_plan: Optional[dict] = None
+    scene_graph: Optional[dict] = None
+    reference_image_base64: Optional[str] = None
+
+
+class SceneLayerEditRequest(BaseModel):
+    prompt: str
+    aspect_ratio: Optional[str] = "3:4"
+    positive_prompt: Optional[str] = None
+    reference_image_base64: str
+    draft: Optional[dict] = None
+    layer_plan: Optional[dict] = None
+    scene_graph: Optional[dict] = None
+    target_layer_id: str
+    target_layer_label: Optional[str] = None
+    target_layer_type: Optional[str] = None
+    edit_prompt: str
 
 
 class LayeredRequest(BaseModel):
@@ -710,6 +738,7 @@ def _call_gemini_generate_content(
     response_mime_type: Optional[str] = None,
     response_modalities: Optional[List[str]] = None,
     image_config: Optional[dict] = None,
+    thinking_config: Optional[dict] = None,
     system_instruction: Optional[str] = None,
     temperature: Optional[float] = None,
     timeout_seconds: int = 120,
@@ -733,6 +762,8 @@ def _call_gemini_generate_content(
         payload["generationConfig"]["responseModalities"] = response_modalities
     if image_config:
         payload["generationConfig"]["imageConfig"] = image_config
+    if thinking_config:
+        payload["generationConfig"]["thinkingConfig"] = thinking_config
     payload["generationConfig"]["temperature"] = (
         float(temperature) if temperature is not None else float(config.get("temperature") or 0.4)
     )
@@ -897,6 +928,33 @@ def _safe_parse_json_object(text: str) -> dict:
             except json.JSONDecodeError:
                 return {}
         return {}
+
+
+def _safe_parse_json_value(text: str):
+    if not text:
+        return None
+    candidate = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", candidate, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        list_start = candidate.find("[")
+        list_end = candidate.rfind("]")
+        if list_start != -1 and list_end > list_start:
+            try:
+                return json.loads(candidate[list_start:list_end + 1])
+            except json.JSONDecodeError:
+                pass
+        obj_start = candidate.find("{")
+        obj_end = candidate.rfind("}")
+        if obj_start != -1 and obj_end > obj_start:
+            try:
+                return json.loads(candidate[obj_start:obj_end + 1])
+            except json.JSONDecodeError:
+                return None
+    return None
 
 
 def _coerce_options(value) -> List[str]:
@@ -2569,6 +2627,440 @@ def _build_scene_reference_bundle(prompt: str, draft: dict, layer_plan_payload: 
         return image_b64, fallback_graph
 
 
+def _resolve_gemini_vision_model() -> str:
+    configured = os.getenv("GEMINI_VISION_MODEL", "").strip()
+    if configured:
+        return configured
+    llm_model = (_resolve_llm_config().get("model") or "").strip()
+    if llm_model and "image-preview" not in llm_model:
+        return llm_model
+    return "gemini-3-flash-preview"
+
+
+def _slugify_identifier(value: str, fallback: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "-", value or "").strip("-").lower()
+    return normalized[:48] or fallback
+
+
+def _normalize_segment_layer_type(value: Any, bbox: dict, label: str = "") -> str:
+    text = _safe_text(value).lower()
+    if text in {"subject", "decor"}:
+        return text
+    area = _clamp_ratio(bbox.get("w"), 0.2) * _clamp_ratio(bbox.get("h"), 0.2)
+    lower_label = label.lower()
+    if area >= 0.08 or re.search(r"(人物|模特|主视觉|产品|主体|hero|subject)", lower_label):
+        return "subject"
+    return "decor"
+
+
+def _normalize_box2d_to_bbox(value, fallback: Optional[dict] = None) -> dict:
+    fallback = fallback or {"x": 0.25, "y": 0.25, "w": 0.4, "h": 0.4}
+    if isinstance(value, list) and len(value) == 4:
+        try:
+            y0, x0, y1, x1 = [float(v) for v in value]
+            x = _clamp_ratio(x0 / 1000.0, fallback["x"])
+            y = _clamp_ratio(y0 / 1000.0, fallback["y"])
+            w = _clamp_ratio((x1 - x0) / 1000.0, fallback["w"])
+            h = _clamp_ratio((y1 - y0) / 1000.0, fallback["h"])
+            if w > 0 and h > 0:
+                return {"x": x, "y": y, "w": min(1.0 - x, w), "h": min(1.0 - y, h)}
+        except (TypeError, ValueError):
+            pass
+    return _normalize_scene_bbox(value if isinstance(value, dict) else {}, fallback)
+
+
+def _bbox_to_box2d(bbox: dict) -> List[int]:
+    x = _clamp_ratio(bbox.get("x"), 0.0)
+    y = _clamp_ratio(bbox.get("y"), 0.0)
+    w = _clamp_ratio(bbox.get("w"), 0.0)
+    h = _clamp_ratio(bbox.get("h"), 0.0)
+    return [
+        int(round(y * 1000)),
+        int(round(x * 1000)),
+        int(round(min(1.0, y + h) * 1000)),
+        int(round(min(1.0, x + w) * 1000)),
+    ]
+
+
+def _bbox_to_pixels(bbox: dict, width: int, height: int) -> Tuple[int, int, int, int]:
+    x = int(width * _clamp_ratio(bbox.get("x"), 0.0))
+    y = int(height * _clamp_ratio(bbox.get("y"), 0.0))
+    w = max(1, int(width * _clamp_ratio(bbox.get("w"), 0.1)))
+    h = max(1, int(height * _clamp_ratio(bbox.get("h"), 0.1)))
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
+    return x, y, min(width, x + w), min(height, y + h)
+
+
+def _decode_mask_probability(mask_value: str, width: int, height: int) -> Optional[Image.Image]:
+    if not isinstance(mask_value, str) or not mask_value.strip():
+        return None
+    payload = mask_value
+    if payload.startswith("data:"):
+        _, _, payload = payload.partition(",")
+    if not payload:
+        return None
+    try:
+        mask = Image.open(io.BytesIO(base64.b64decode(payload))).convert("L")
+        return mask.resize((max(1, width), max(1, height)), Image.Resampling.BILINEAR)
+    except Exception:
+        return None
+
+
+def _binary_mask_from_probability(mask: Optional[Image.Image], width: int, height: int) -> Image.Image:
+    if mask is None:
+        return Image.new("L", (width, height), 255)
+    return mask.point(lambda p: 255 if p > 128 else 0)
+
+
+def _extract_cutout_from_bbox(image_b64: str, bbox: dict, mask_value: Optional[str] = None) -> Tuple[str, str, int, int]:
+    image = _decode_base64_image(image_b64)
+    width, height = image.size
+    left, top, right, bottom = _bbox_to_pixels(bbox, width, height)
+    crop = image.crop((left, top, right, bottom)).convert("RGBA")
+    crop_w, crop_h = crop.size
+    probability_mask = _decode_mask_probability(mask_value or "", crop_w, crop_h)
+    binary_mask = _binary_mask_from_probability(probability_mask, crop_w, crop_h)
+    cutout = crop.copy()
+    cutout.putalpha(binary_mask)
+    return _encode_image_base64(cutout), _encode_image_base64(binary_mask), crop_w, crop_h
+
+
+def _bbox_iou(left: dict, right: dict) -> float:
+    left_x0 = _clamp_ratio(left.get("x"), 0.0)
+    left_y0 = _clamp_ratio(left.get("y"), 0.0)
+    left_x1 = min(1.0, left_x0 + _clamp_ratio(left.get("w"), 0.0))
+    left_y1 = min(1.0, left_y0 + _clamp_ratio(left.get("h"), 0.0))
+    right_x0 = _clamp_ratio(right.get("x"), 0.0)
+    right_y0 = _clamp_ratio(right.get("y"), 0.0)
+    right_x1 = min(1.0, right_x0 + _clamp_ratio(right.get("w"), 0.0))
+    right_y1 = min(1.0, right_y0 + _clamp_ratio(right.get("h"), 0.0))
+    inter_x0 = max(left_x0, right_x0)
+    inter_y0 = max(left_y0, right_y0)
+    inter_x1 = min(left_x1, right_x1)
+    inter_y1 = min(left_y1, right_y1)
+    if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
+        return 0.0
+    inter_area = (inter_x1 - inter_x0) * (inter_y1 - inter_y0)
+    left_area = max(1e-6, (left_x1 - left_x0) * (left_y1 - left_y0))
+    right_area = max(1e-6, (right_x1 - right_x0) * (right_y1 - right_y0))
+    return inter_area / max(1e-6, left_area + right_area - inter_area)
+
+
+def _match_previous_scene_object(label: str, layer_type: str, bbox: dict, previous_objects: List[dict]) -> Optional[dict]:
+    best = None
+    best_score = 0.0
+    label_lower = label.lower()
+    for obj in previous_objects:
+        if not isinstance(obj, dict):
+            continue
+        obj_type = _safe_text(obj.get("layer_type"), "subject")
+        if obj_type != layer_type:
+            continue
+        score = _bbox_iou(bbox, obj.get("bbox") or {})
+        obj_label = _safe_text(obj.get("label")).lower()
+        if obj_label and (obj_label in label_lower or label_lower in obj_label):
+            score += 0.25
+        if score > best_score:
+            best = obj
+            best_score = score
+    return best if best_score >= 0.2 else None
+
+
+def _build_scene_render_prompt(
+    prompt: str,
+    positive_prompt: str,
+    selected_options: Optional[dict],
+    ui_state: Optional[dict],
+) -> str:
+    base = _safe_text(positive_prompt, prompt)
+    selected = []
+    for key, values in (selected_options or {}).items():
+        if not values:
+            continue
+        if isinstance(values, list):
+            text = " / ".join(_safe_text(v) for v in values if _safe_text(v))
+        else:
+            text = _safe_text(values)
+        if text:
+            selected.append(f"{key}: {text}")
+    ui_lines = []
+    for key, value in (ui_state or {}).items():
+        if isinstance(value, str):
+            text = value.strip()
+            if text and len(text) <= 120 and not text.startswith("data:"):
+                ui_lines.append(f"{key}: {text}")
+        elif isinstance(value, (int, float, bool)):
+            ui_lines.append(f"{key}: {value}")
+        elif isinstance(value, dict):
+            sub = []
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, str) and sub_value.strip() and not sub_value.startswith("data:"):
+                    sub.append(f"{sub_key}={sub_value.strip()}")
+            if sub:
+                ui_lines.append(f"{key}: {', '.join(sub[:4])}")
+    details = []
+    if selected:
+        details.append("已选项：" + "；".join(selected[:12]))
+    if ui_lines:
+        details.append("全局配置：" + "；".join(ui_lines[:12]))
+    return f"{base}。{' '.join(details)}".strip()
+
+
+def _call_gemini_image_edit(
+    instruction: str,
+    *,
+    image_b64: str,
+    width: int,
+    height: int,
+    timeout_seconds: int = 180,
+) -> str:
+    image_config = _resolve_image_config()
+    parsed = _call_gemini_generate_content(
+        parts=[
+            _gemini_inline_image_part(image_b64),
+            {"text": instruction},
+        ],
+        model=image_config.get("model"),
+        response_modalities=["IMAGE", "TEXT"],
+        image_config={
+            "aspectRatio": _match_gemini_aspect_ratio(width, height),
+            "imageSize": _resolve_gemini_image_size(width, height),
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    image_b64 = _extract_gemini_inline_image(parsed)
+    if not image_b64:
+        raise RuntimeError(f"Gemini 图片编辑未返回图片数据: {_extract_gemini_text(parsed) or parsed}")
+    return image_b64
+
+
+def _segment_scene_reference_image(image_b64: str, fallback_graph: dict) -> List[dict]:
+    labels_hint = ", ".join(
+        _safe_text(item.get("label"))
+        for item in (fallback_graph.get("objects") or [])
+        if isinstance(item, dict) and _safe_text(item.get("label")) and _safe_text(item.get("layer_type")) != "background"
+    )
+    prompt = (
+        "Return JSON only. Identify the prominent non-background visual elements that should be independently editable. "
+        "Output a JSON array. Each item must include: "
+        "id(string), label(string), layer_type(subject|decor), depth_order(number), "
+        "box_2d([ymin,xmin,ymax,xmax] normalized 0-1000), mask(string PNG data URI), prompt(string). "
+        "Exclude background and exclude large text-only regions. Merge tiny clutter. Prefer 1-6 items."
+    )
+    if labels_hint:
+        prompt += f" Expected editable elements may include: {labels_hint}."
+    parsed = _call_gemini_generate_content(
+        parts=[
+            _gemini_inline_image_part(image_b64),
+            {"text": prompt},
+        ],
+        model=_resolve_gemini_vision_model(),
+        response_mime_type="application/json",
+        thinking_config={"thinkingBudget": 0},
+        timeout_seconds=180,
+    )
+    text = _extract_gemini_text(parsed)
+    value = _safe_parse_json_value(text)
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("items"), list):
+        return value.get("items") or []
+    raise RuntimeError(f"Gemini 分割未返回有效 JSON: {text or parsed}")
+
+
+def _build_snapshot_scene_graph(segmented_layers: List[dict], fallback_graph: dict) -> dict:
+    return {
+        "summary": _safe_text(fallback_graph.get("summary")),
+        "text_safe_zone": _normalize_scene_bbox(
+            fallback_graph.get("text_safe_zone") if isinstance(fallback_graph, dict) else {},
+            {"x": 0.08, "y": 0.1, "w": 0.36, "h": 0.28},
+        ),
+        "objects": [
+            {
+                "id": layer["id"],
+                "label": layer["label"],
+                "layer_type": layer["layer_type"],
+                "bbox": layer["bbox"],
+                "depth_order": layer["z_index"],
+                "prompt": layer["source_prompt"],
+                "needs_transparent_bg": True,
+            }
+            for layer in segmented_layers
+        ],
+    }
+
+
+def _build_segmented_layers(
+    image_b64: str,
+    raw_items: List[dict],
+    fallback_graph: dict,
+) -> Tuple[List[dict], bool]:
+    fallback_objects = [
+        item for item in (fallback_graph.get("objects") or [])
+        if isinstance(item, dict) and _safe_text(item.get("layer_type")) != "background"
+    ]
+    normalized_layers: List[dict] = []
+    used_fallback = False
+
+    if not raw_items:
+        used_fallback = True
+        raw_items = [
+            {
+                "label": _safe_text(item.get("label"), f"图层 {index + 1}"),
+                "layer_type": _safe_text(item.get("layer_type"), "subject"),
+                "depth_order": item.get("depth_order", index + 1),
+                "box_2d": _bbox_to_box2d(item.get("bbox") or _default_scene_bbox("subject", index)),
+                "prompt": _safe_text(item.get("prompt")),
+            }
+            for index, item in enumerate(fallback_objects[:6])
+        ]
+
+    for index, raw in enumerate(raw_items[:6]):
+        if not isinstance(raw, dict):
+            continue
+        fallback_obj = fallback_objects[index] if index < len(fallback_objects) else {}
+        bbox = _normalize_box2d_to_bbox(raw.get("box_2d"), (fallback_obj or {}).get("bbox") or _default_scene_bbox("subject", index))
+        label = _safe_text(raw.get("label"), _safe_text((fallback_obj or {}).get("label"), f"图层 {index + 1}"))
+        layer_type = _normalize_segment_layer_type(raw.get("layer_type"), bbox, label)
+        previous_obj = _match_previous_scene_object(label, layer_type, bbox, fallback_objects)
+        layer_id = _safe_text(raw.get("id"))
+        if not layer_id and previous_obj:
+            layer_id = _safe_text(previous_obj.get("id"))
+        layer_id = layer_id or _slugify_identifier(label, f"{layer_type}-{index + 1}")
+        prompt = _safe_text(raw.get("prompt"), _safe_text((previous_obj or {}).get("prompt"), label))
+        depth_order = int(raw.get("depth_order") or (previous_obj or {}).get("depth_order") or index + 1)
+        try:
+            cutout_b64, mask_b64, width, height = _extract_cutout_from_bbox(image_b64, bbox, raw.get("mask"))
+        except Exception:
+            used_fallback = True
+            cutout_b64, mask_b64, width, height = _extract_cutout_from_bbox(image_b64, bbox, None)
+        normalized_layers.append(
+            {
+                "id": layer_id,
+                "label": label,
+                "layer_type": layer_type,
+                "bbox": bbox,
+                "width": width,
+                "height": height,
+                "z_index": depth_order,
+                "mask_image_base64": mask_b64,
+                "cutout_image_base64": cutout_b64,
+                "source_prompt": prompt or label,
+                "editable": True,
+            }
+        )
+
+    normalized_layers.sort(key=lambda item: item["z_index"])
+    return normalized_layers, used_fallback
+
+
+def _generate_clean_plate_image(reference_image_b64: str, segmented_layers: List[dict], aspect_ratio: str) -> Tuple[str, bool]:
+    if not segmented_layers:
+        return reference_image_b64, True
+    width, height = _aspect_size(aspect_ratio, width=1536)
+    labels = "、".join(layer["label"] for layer in segmented_layers[:8])
+    instruction = (
+        "Using the provided image, remove all independently editable foreground objects and rebuild a clean background plate. "
+        f"Objects to remove: {labels}. "
+        "Preserve original composition, camera angle, perspective, lighting, atmosphere, texture and empty text-safe area. "
+        "Return only the cleaned scene background, with no text and no new foreground subjects."
+    )
+    try:
+        return _call_gemini_image_edit(
+            instruction,
+            image_b64=reference_image_b64,
+            width=width,
+            height=height,
+            timeout_seconds=180,
+        ), False
+    except Exception:
+        return reference_image_b64, True
+
+
+def _build_scene_snapshot(
+    *,
+    prompt: str,
+    draft: dict,
+    layer_plan_payload: dict,
+    reference_image_b64: str,
+    fallback_graph: Optional[dict] = None,
+) -> Tuple[dict, dict]:
+    aspect_ratio = _safe_text((draft.get("brief") or {}).get("aspect_ratio"), "3:4")
+    base_graph = fallback_graph or _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    warnings = []
+    try:
+        raw_segments = _segment_scene_reference_image(reference_image_b64, base_graph)
+    except Exception as exc:
+        raw_segments = []
+        warnings.append(f"图层识别失败，已使用框选兜底：{exc}")
+    segmented_layers, segmentation_fallback_used = _build_segmented_layers(reference_image_b64, raw_segments, base_graph)
+    if segmentation_fallback_used and not warnings:
+        warnings.append("图层识别部分使用框选兜底，边缘可能不够精确。")
+    clean_plate_b64, clean_plate_fallback_used = _generate_clean_plate_image(reference_image_b64, segmented_layers, aspect_ratio)
+    if clean_plate_fallback_used:
+        warnings.append("背景净板生成失败，当前预览将回退到完整参考图背景。")
+    scene_graph = _build_snapshot_scene_graph(segmented_layers, base_graph)
+    width, height = _aspect_size(aspect_ratio, width=1536)
+    snapshot = {
+        "revision_id": uuid.uuid4().hex,
+        "reference_image_base64": reference_image_b64,
+        "clean_plate_image_base64": clean_plate_b64,
+        "width": width,
+        "height": height,
+        "layers": segmented_layers,
+        "warnings": warnings,
+        "segmentation_fallback_used": segmentation_fallback_used,
+        "clean_plate_fallback_used": clean_plate_fallback_used,
+    }
+    return snapshot, scene_graph
+
+
+def _coerce_scene_draft(payload: Optional[dict], prompt: str, aspect_ratio: str) -> dict:
+    if isinstance(payload, dict):
+        draft = json.loads(json.dumps(payload))
+    else:
+        draft = {
+            "brief": {"prompt": prompt, "summary": prompt, "aspect_ratio": aspect_ratio},
+            "copy": {"headline": "", "subtitle": "", "body": "", "primary_color": "#F4A261"},
+            "controls": {"positive_prompt": prompt, "negative_prompt": "", "steps": 28, "cfg_scale": 7, "seed_locked": False},
+            "materials": {"background": None, "subjects": [], "decors": [], "slots": []},
+        }
+    draft.setdefault("brief", {})
+    draft["brief"]["prompt"] = _safe_text((draft.get("brief") or {}).get("prompt"), prompt)
+    draft["brief"]["summary"] = _safe_text((draft.get("brief") or {}).get("summary"), draft["brief"]["prompt"])
+    draft["brief"]["aspect_ratio"] = _safe_text((draft.get("brief") or {}).get("aspect_ratio"), aspect_ratio)
+    draft.setdefault("controls", {})
+    draft["controls"]["positive_prompt"] = _safe_text((draft.get("controls") or {}).get("positive_prompt"), draft["brief"]["prompt"])
+    return draft
+
+
+def _build_regenerated_reference_image(req: SceneSnapshotRequest, fallback_graph: dict) -> str:
+    aspect_ratio = _safe_text(req.aspect_ratio, (req.draft or {}).get("brief", {}).get("aspect_ratio") if isinstance(req.draft, dict) else "3:4")
+    width, height = _aspect_size(aspect_ratio, width=1536)
+    render_prompt = _build_scene_render_prompt(req.prompt, _safe_text(req.positive_prompt), req.selected_options, req.ui_state)
+    return _call_gemini_image(render_prompt, width=width, height=height)
+
+
+def _edit_scene_reference_image(req: SceneLayerEditRequest) -> str:
+    aspect_ratio = _safe_text(req.aspect_ratio, "3:4")
+    width, height = _aspect_size(aspect_ratio, width=1536)
+    target_label = _safe_text(req.target_layer_label, req.target_layer_id)
+    target_type = _safe_text(req.target_layer_type, "subject")
+    instruction = (
+        f"Using the provided image, change only the {target_type} object '{target_label}' so that it becomes: {req.edit_prompt}. "
+        "Keep every other object, camera position, perspective, layout, lighting, shadows, and background unchanged. "
+        "Do not add extra objects and do not change text areas."
+    )
+    return _call_gemini_image_edit(
+        instruction,
+        image_b64=req.reference_image_base64,
+        width=width,
+        height=height,
+        timeout_seconds=180,
+    )
+
+
 def build_scene_plan_payload(req: LayoutRequest) -> dict:
     layout_payload = generate_llm_layout(req)
     layer_plan_payload = analyze_layer_plan(
@@ -2593,14 +3085,22 @@ def build_scene_plan_payload(req: LayoutRequest) -> dict:
         "materials": _extract_scene_materials_from_layout(layout_config),
     }
     reference_image_base64, scene_graph = _build_scene_reference_bundle(req.prompt, draft, layer_plan_payload)
-    draft = _attach_scene_graph_to_draft(draft, scene_graph, reference_image_base64)
+    snapshot, segmented_graph = _build_scene_snapshot(
+        prompt=req.prompt,
+        draft=draft,
+        layer_plan_payload=layer_plan_payload,
+        reference_image_b64=reference_image_base64 or "",
+        fallback_graph=scene_graph,
+    )
+    draft = _attach_scene_graph_to_draft(draft, segmented_graph, reference_image_base64)
     return {
         "text_response": layout_payload.get("text_response") or "",
         "layout_config": layout_config,
         "layer_plan": layer_plan_payload,
         "draft": draft,
         "reference_image_base64": reference_image_base64,
-        "scene_graph": scene_graph,
+        "scene_graph": segmented_graph,
+        "snapshot": snapshot,
     }
 
 import uuid
@@ -3387,6 +3887,109 @@ def scene_plan(req: LayoutRequest):
     return build_scene_plan_payload(req)
 
 
+@app.post("/scene/regenerate")
+def scene_regenerate(req: SceneSnapshotRequest):
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    aspect_ratio = _safe_text(req.aspect_ratio, "3:4")
+    draft = _coerce_scene_draft(req.draft, req.prompt, aspect_ratio)
+    if _safe_text(req.positive_prompt):
+        draft.setdefault("controls", {})
+        draft["controls"]["positive_prompt"] = _safe_text(req.positive_prompt)
+    layer_plan_payload = analyze_layer_plan(
+        {
+            "chat_history": req.chat_history or f"User: {req.prompt}",
+            "selected_options": req.selected_options or {},
+            "ui_state": req.ui_state or {},
+            "aspect_ratio": aspect_ratio,
+        }
+    )
+    fallback_graph = _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    try:
+        reference_image_b64 = _build_regenerated_reference_image(req, fallback_graph)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"整图重生成失败: {exc}"})
+    snapshot, scene_graph = _build_scene_snapshot(
+        prompt=req.prompt,
+        draft=draft,
+        layer_plan_payload=layer_plan_payload,
+        reference_image_b64=reference_image_b64,
+        fallback_graph=fallback_graph,
+    )
+    draft = _attach_scene_graph_to_draft(draft, scene_graph, reference_image_b64)
+    return {
+        "snapshot": snapshot,
+        "scene_graph": scene_graph,
+        "layer_plan": layer_plan_payload,
+        "draft": draft,
+    }
+
+
+@app.post("/scene/resegment")
+def scene_resegment(req: SceneSnapshotRequest):
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    if not _safe_text(req.reference_image_base64):
+        return JSONResponse(status_code=400, content={"error": "缺少 reference_image_base64"})
+    aspect_ratio = _safe_text(req.aspect_ratio, "3:4")
+    draft = _coerce_scene_draft(req.draft, req.prompt, aspect_ratio)
+    layer_plan_payload = req.layer_plan if isinstance(req.layer_plan, dict) else analyze_layer_plan(
+        {
+            "chat_history": req.chat_history or f"User: {req.prompt}",
+            "selected_options": req.selected_options or {},
+            "ui_state": req.ui_state or {},
+            "aspect_ratio": aspect_ratio,
+        }
+    )
+    fallback_graph = req.scene_graph if isinstance(req.scene_graph, dict) else _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    snapshot, scene_graph = _build_scene_snapshot(
+        prompt=req.prompt,
+        draft=draft,
+        layer_plan_payload=layer_plan_payload,
+        reference_image_b64=_safe_text(req.reference_image_base64),
+        fallback_graph=fallback_graph,
+    )
+    draft = _attach_scene_graph_to_draft(draft, scene_graph, _safe_text(req.reference_image_base64))
+    return {
+        "snapshot": snapshot,
+        "scene_graph": scene_graph,
+        "layer_plan": layer_plan_payload,
+        "draft": draft,
+    }
+
+
+@app.post("/scene/edit-layer")
+def scene_edit_layer(req: SceneLayerEditRequest):
+    if not req.prompt:
+        return JSONResponse(status_code=400, content={"error": "prompt 不能为空"})
+    if not _safe_text(req.reference_image_base64):
+        return JSONResponse(status_code=400, content={"error": "缺少 reference_image_base64"})
+    if not _safe_text(req.edit_prompt):
+        return JSONResponse(status_code=400, content={"error": "edit_prompt 不能为空"})
+    aspect_ratio = _safe_text(req.aspect_ratio, "3:4")
+    draft = _coerce_scene_draft(req.draft, req.prompt, aspect_ratio)
+    layer_plan_payload = req.layer_plan if isinstance(req.layer_plan, dict) else {"layer_plan": []}
+    try:
+        reference_image_b64 = _edit_scene_reference_image(req)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"局部替换失败: {exc}"})
+    fallback_graph = req.scene_graph if isinstance(req.scene_graph, dict) else _build_scene_graph_from_layer_plan(layer_plan_payload, draft)
+    snapshot, scene_graph = _build_scene_snapshot(
+        prompt=req.prompt,
+        draft=draft,
+        layer_plan_payload=layer_plan_payload,
+        reference_image_b64=reference_image_b64,
+        fallback_graph=fallback_graph,
+    )
+    draft = _attach_scene_graph_to_draft(draft, scene_graph, reference_image_b64)
+    return {
+        "snapshot": snapshot,
+        "scene_graph": scene_graph,
+        "layer_plan": layer_plan_payload,
+        "draft": draft,
+    }
+
+
 @app.post("/scene/reference-image")
 def scene_reference_image(payload: dict):
     prompt = _safe_text(payload.get("prompt"))
@@ -3515,8 +4118,6 @@ def generate_image(req: ImageRequest):
     lora_models: List[str] = []
     try:
         requested_transparency = bool(req.remove_background) or bool(req.transparent_background)
-        if not requested_transparency and (req.layer_type or "").strip().lower() not in {"", "background"}:
-            requested_transparency = True
         provider = _resolve_image_provider(req.image_provider)
         reference_object = _resolve_reference_object(req)
         reference_crop_b64 = None
@@ -3580,6 +4181,16 @@ def generate_image(req: ImageRequest):
                 if supports_multi and adapter_names:
                     pipe.set_adapters(adapter_names, adapter_weights=[1.0] * len(adapter_names))
 
+        generator = None
+        if req.seed is not None:
+            generator_device = "cpu"
+            execution_device = getattr(pipe, "_execution_device", None)
+            if execution_device is not None:
+                device_name = str(execution_device)
+                if device_name.startswith("cuda"):
+                    generator_device = "cuda"
+            generator = torch.Generator(device=generator_device).manual_seed(int(req.seed))
+
         with torch.inference_mode():
             image = pipe(
                 prompt=conditioned_prompt,
@@ -3588,6 +4199,7 @@ def generate_image(req: ImageRequest):
                 guidance_scale=req.guidance_scale or 7.5,
                 width=width,
                 height=height,
+                generator=generator,
             ).images[0]
 
         img_byte_arr = io.BytesIO()
